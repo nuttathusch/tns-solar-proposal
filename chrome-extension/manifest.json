@@ -1,0 +1,45 @@
+{
+  "manifest_version": 3,
+  "name": "TNS SolarEdge 1-Click Sync",
+  "version": "1.0.0",
+  "description": "ดึงภาพจำลอง 2D/3D, ขนาด kWp, จำนวนแผง, และ MWh จาก SolarEdge Designer เข้าสู่ TNS Solar Proposal Studio อัตโนมัติใน 1 คลิก",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "permissions": [
+    "tabs",
+    "activeTab",
+    "storage",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://designer.solaredge.com/*",
+    "https://nuttathusch.github.io/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
+  ],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
+  },
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://designer.solaredge.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

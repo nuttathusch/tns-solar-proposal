@@ -36,6 +36,45 @@ export default function App() {
     saveProposal(proposal);
   }, [proposal]);
 
+  // Listen for TNS Chrome Extension 1-Click Sync events
+  useEffect(() => {
+    const handleExtensionMessage = (event: MessageEvent) => {
+      if (event.data && event.data.type === 'TNS_SOLAREDGE_SYNC') {
+        const payload = event.data.payload;
+        console.log('[TNS App] Received sync from Chrome Extension:', payload);
+        
+        setProposal(prev => {
+          const updated = { ...prev };
+          if (payload.projectName) {
+            updated.customer = { ...updated.customer, name: payload.projectName };
+          }
+          if (payload.street) {
+            updated.customer = { ...updated.customer, address: payload.street };
+          }
+          if (payload.dcPowerKwp && payload.dcPowerKwp > 0) {
+            updated.systemSizeKwp = payload.dcPowerKwp;
+          }
+          if (payload.modulesCount && payload.modulesCount > 0) {
+            updated.panelCount = payload.modulesCount;
+          }
+          if (payload.canvasDataUrl) {
+            updated.media = {
+              ...updated.media,
+              roofDesignTop: payload.canvasDataUrl,
+              roofDesignIso: payload.canvasDataUrl
+            };
+          }
+          return updated;
+        });
+
+        alert(`⚡ ได้รับข้อมูลจาก SolarEdge เรียบร้อยแล้ว!\n• โครงการ: ${payload.projectName || 'SolarEdge Design'}\n• กำลังผลิต: ${payload.dcPowerKwp || '13'} kWp\n• จำนวนแผง: ${payload.modulesCount || '20'} แผง\n• บันทึกรูปภาพ 2D/3D เข้าเล่ม Proposal เรียบร้อยแล้วครับ!`);
+      }
+    };
+
+    window.addEventListener('message', handleExtensionMessage);
+    return () => window.removeEventListener('message', handleExtensionMessage);
+  }, []);
+
   const handleManualSave = () => {
     saveProposal(proposal);
     setIsSaved(true);
