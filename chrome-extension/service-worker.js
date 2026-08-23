@@ -7,17 +7,34 @@ chrome.runtime.onInstalled.addListener(() => {
 // Handle messages
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'SYNC_SOLAREDGE_DATA') {
-    handleSyncData(message.data).then(result => sendResponse(result));
+    handleSyncData(message.data, sender.tab).then(result => sendResponse(result));
     return true; // Keep channel open for async response
   }
 });
 
-async function handleSyncData(data) {
+async function handleSyncData(data, senderTab) {
   try {
-    // 1. Store in chrome.storage.local
-    await chrome.storage.local.set({ lastSyncedSolarEdge: data });
+    // 1. Capture the exact visible tab screenshot (Full High-Resolution Image of SolarEdge Design)
+    let screenshotUrl = '';
+    const targetWindowId = (senderTab && senderTab.windowId) ? senderTab.windowId : null;
+    
+    try {
+      screenshotUrl = await chrome.tabs.captureVisibleTab(targetWindowId, { format: 'png' });
+      console.log('[TNS Solar] Successfully captured SolarEdge visible tab screenshot');
+    } catch (err) {
+      console.warn('[TNS Solar] captureVisibleTab failed, using canvas fallback:', err);
+      screenshotUrl = data.canvasDataUrl || '';
+    }
 
-    // 2. Query for open TNS Solar Proposal tabs
+    const finalPayload = {
+      ...data,
+      canvasDataUrl: screenshotUrl || data.canvasDataUrl || ''
+    };
+
+    // 2. Store in chrome.storage.local
+    await chrome.storage.local.set({ lastSyncedSolarEdge: finalPayload });
+
+    // 3. Query for open TNS Solar Proposal tabs
     const tabs = await chrome.tabs.query({});
     const tnsTab = tabs.find(t => 
       t.url && (
@@ -37,16 +54,16 @@ async function handleSyncData(data) {
       // Send data to TNS Proposal web app
       await chrome.tabs.sendMessage(tnsTab.id, {
         action: 'INJECT_SOLAREDGE_PROPOSAL_DATA',
-        payload: data
+        payload: finalPayload
       }).catch(err => {
-        console.log('Sending message to existing tab, executing direct script injection:', err);
+        console.log('Direct script injection to existing tab:', err);
         chrome.scripting.executeScript({
           target: { tabId: tnsTab.id },
           func: (syncPayload) => {
             window.postMessage({ type: 'TNS_SOLAREDGE_SYNC', payload: syncPayload }, '*');
             localStorage.setItem('tns_solaredge_latest_sync', JSON.stringify(syncPayload));
           },
-          args: [data]
+          args: [finalPayload]
         });
       });
 
@@ -66,10 +83,10 @@ async function handleSyncData(data) {
               window.postMessage({ type: 'TNS_SOLAREDGE_SYNC', payload: syncPayload }, '*');
               localStorage.setItem('tns_solaredge_latest_sync', JSON.stringify(syncPayload));
             },
-            args: [data]
+            args: [finalPayload]
           }).catch(console.error);
         }
-      }, 2000);
+      }, 1500);
 
       return { success: true, tabAction: 'opened_new' };
     }
