@@ -16,7 +16,8 @@ import {
   Minus,
   Wand2,
   MousePointer,
-  HelpCircle
+  HelpCircle,
+  TrendingUp
 } from 'lucide-react';
 
 interface SmartRoofStudioProps {
@@ -32,12 +33,24 @@ interface Point {
 
 interface PlacedPanel {
   id: string;
-  x: number; // canvas pixel X relative to center
-  y: number; // canvas pixel Y relative to center
+  x: number; // in world coordinate (meters / scaled relative to center)
+  y: number;
   orientation: 'portrait' | 'landscape';
 }
 
-type StudioTool = 'draw-roof' | 'edit-vertices' | 'move-panels' | 'pan-map';
+interface RidgeLine {
+  p1: Point;
+  p2: Point;
+  type: 'ridge' | 'hip';
+}
+
+interface RoofFacet {
+  points: Point[];
+  type: 'south' | 'north' | 'east' | 'west';
+  irradiance: number; // 0 - 100
+}
+
+type StudioTool = 'draw-roof' | 'move-panels' | 'pan-map';
 
 export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onApply }) => {
   // Parse coordinates
@@ -64,14 +77,15 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
   // Current active tool
   const [activeTool, setActiveTool] = useState<StudioTool>('draw-roof');
 
-  // Roof Polygon Geometry
+  // Roof Polygon Geometry (in world space relative to center)
   const [polygonPoints, setPolygonPoints] = useState<Point[]>([]);
   const [isPolygonClosed, setIsPolygonClosed] = useState<boolean>(false);
-  const [activeVertexIdx, setActiveVertexIdx] = useState<number | null>(null);
 
-  // Inner Edges & Ridges (Auto Inner Edge / Straight Skeleton)
+  // Auto Inner Edges, Ridges & Facets (High / Low points calculation)
   const [hasInnerEdges, setHasInnerEdges] = useState<boolean>(false);
-  const [ridgeLines, setRidgeLines] = useState<{ p1: Point; p2: Point }[]>([]);
+  const [ridgeLines, setRidgeLines] = useState<RidgeLine[]>([]);
+  const [roofFacets, setRoofFacets] = useState<RoofFacet[]>([]);
+  const [highPointLabels, setHighPointLabels] = useState<{ pt: Point; text: string }[]>([]);
 
   // Interactive Placed Panels
   const [panels, setPanels] = useState<PlacedPanel[]>([]);
@@ -102,12 +116,33 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
     setPanOffset({ x: 0, y: 0 });
   }, [proposal.customer.coordinates]);
 
-  // Initialize a default house polygon centered on map if empty
+  // Transform browser mouse event to exact World coordinates on the canvas
+  const getCanvasCoords = useCallback((e: React.MouseEvent<HTMLCanvasElement>): Point => {
+    const canvas = canvas2dRef.current;
+    if (!canvas) return { x: 0, y: 0 };
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    
+    // Pixel on canvas buffer
+    const canvasPixelX = (e.clientX - rect.left) * scaleX;
+    const canvasPixelY = (e.clientY - rect.top) * scaleY;
+
+    const centerX = canvas.width / 2 + panOffset.x;
+    const centerY = canvas.height / 2 + panOffset.y;
+
+    // Invert zoom and translation to get exact world coordinate
+    const worldX = (canvasPixelX - centerX) / digitalScale;
+    const worldY = (canvasPixelY - centerY) / digitalScale;
+
+    return { x: worldX, y: worldY };
+  }, [panOffset, digitalScale]);
+
+  // Initialize a starter house polygon
   const initPresetLOrGable = (type: 'gable' | 'l-shape') => {
-    const mpp = getMetersPerPixel();
     if (type === 'gable') {
-      const w = 12 / mpp;
-      const h = 8 / mpp;
+      const w = 90;
+      const h = 60;
       const pts: Point[] = [
         { x: -w / 2, y: -h / 2 },
         { x: w / 2, y: -h / 2 },
@@ -119,8 +154,8 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
       computeInnerEdges(pts);
       autoPlacePanelsOnPolygon(pts, proposal.panelCount || 6);
     } else {
-      const w = 14 / mpp;
-      const wing = 6 / mpp;
+      const w = 100;
+      const wing = 45;
       const pts: Point[] = [
         { x: -w / 2 + wing, y: -w / 2 },
         { x: w / 2, y: -w / 2 },
@@ -136,56 +171,126 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
     }
   };
 
-  // AUTO INNER EDGE: Computes ridge lines, medial axis and hip vertices automatically
-  const computeInnerEdges = (points: Point[]) => {
+  // AUTO INNER EDGE: Computes High/Low points, Ridges, Hips, and Facet Slopes
+  const computeInnerEdges = useCallback((points: Point[]) => {
     if (points.length < 3) return;
 
-    // Calculate Centroid
-    let cx = 0;
-    let cy = 0;
-    points.forEach(p => {
-      cx += p.x;
-      cy += p.y;
-    });
-    cx /= points.length;
-    cy /= points.length;
-
-    const ridges: { p1: Point; p2: Point }[] = [];
+    const ridges: RidgeLine[] = [];
+    const facets: RoofFacet[] = [];
+    const highLabels: { pt: Point; text: string }[] = [];
 
     if (points.length === 4) {
-      // Rectangular Gable / Hip Roof: Create central ridge line
-      const mid1 = { x: (points[0].x + points[3].x) / 2, y: (points[0].y + points[3].y) / 2 };
-      const mid2 = { x: (points[1].x + points[2].x) / 2, y: (points[1].y + points[2].y) / 2 };
+      // Quadrilateral Roof (P0=TL, P1=TR, P2=BR, P3=BL)
+      const p0 = points[0], p1 = points[1], p2 = points[2], p3 = points[3];
+      
+      const lenTop = Math.hypot(p1.x - p0.x, p1.y - p0.y);
+      const lenBottom = Math.hypot(p2.x - p3.x, p2.y - p3.y);
+      const lenLeft = Math.hypot(p3.x - p0.x, p3.y - p0.y);
+      const lenRight = Math.hypot(p2.x - p1.x, p2.y - p1.y);
 
-      // Central ridge
-      ridges.push({ p1: mid1, p2: mid2 });
-      // Hips to corners
-      ridges.push({ p1: points[0], p2: mid1 });
-      ridges.push({ p1: points[3], p2: mid1 });
-      ridges.push({ p1: points[1], p2: mid2 });
-      ridges.push({ p1: points[2], p2: mid2 });
+      const isHorizontalRidge = (lenTop + lenBottom) >= (lenLeft + lenRight);
+
+      if (isHorizontalRidge) {
+        const midLeft = { x: (p0.x + p3.x) / 2, y: (p0.y + p3.y) / 2 };
+        const midRight = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
+
+        // Ridge Inset for Hip Roof
+        const ridgeA = { x: midLeft.x * 0.7 + midRight.x * 0.3, y: midLeft.y * 0.7 + midRight.y * 0.3 };
+        const ridgeB = { x: midLeft.x * 0.3 + midRight.x * 0.7, y: midLeft.y * 0.3 + midRight.y * 0.7 };
+
+        // Central Ridge (Highest point +2.5m)
+        ridges.push({ p1: ridgeA, p2: ridgeB, type: 'ridge' });
+        // Hips down to low points (Eaves 0.0m)
+        ridges.push({ p1: p0, p2: ridgeA, type: 'hip' });
+        ridges.push({ p1: p3, p2: ridgeA, type: 'hip' });
+        ridges.push({ p1: p1, p2: ridgeB, type: 'hip' });
+        ridges.push({ p1: p2, p2: ridgeB, type: 'hip' });
+
+        // South Facing Facet (High Irradiance - 100%)
+        facets.push({
+          points: [p3, p2, ridgeB, ridgeA],
+          type: 'south',
+          irradiance: 100
+        });
+
+        // North Facing Facet (Moderate - 70%)
+        facets.push({
+          points: [p0, p1, ridgeB, ridgeA],
+          type: 'north',
+          irradiance: 70
+        });
+
+        // West Hip
+        facets.push({
+          points: [p0, p3, ridgeA],
+          type: 'west',
+          irradiance: 85
+        });
+
+        // East Hip
+        facets.push({
+          points: [p1, p2, ridgeB],
+          type: 'east',
+          irradiance: 80
+        });
+
+        const ridgeMid = { x: (ridgeA.x + ridgeB.x) / 2, y: (ridgeA.y + ridgeB.y) / 2 };
+        highLabels.push({ pt: ridgeMid, text: 'สันหลังคา สูงสุด (Ridge +2.5m)' });
+      } else {
+        // Vertical Ridge
+        const midTop = { x: (p0.x + p1.x) / 2, y: (p0.y + p1.y) / 2 };
+        const midBottom = { x: (p3.x + p2.x) / 2, y: (p3.y + p2.y) / 2 };
+
+        const ridgeA = { x: midTop.x * 0.7 + midBottom.x * 0.3, y: midTop.y * 0.7 + midBottom.y * 0.3 };
+        const ridgeB = { x: midTop.x * 0.3 + midBottom.x * 0.7, y: midTop.y * 0.3 + midBottom.y * 0.7 };
+
+        ridges.push({ p1: ridgeA, p2: ridgeB, type: 'ridge' });
+        ridges.push({ p1: p0, p2: ridgeA, type: 'hip' });
+        ridges.push({ p1: p1, p2: ridgeA, type: 'hip' });
+        ridges.push({ p1: p3, p2: ridgeB, type: 'hip' });
+        ridges.push({ p1: p2, p2: ridgeB, type: 'hip' });
+
+        facets.push({ points: [p0, p3, ridgeB, ridgeA], type: 'west', irradiance: 90 });
+        facets.push({ points: [p1, p2, ridgeB, ridgeA], type: 'east', irradiance: 85 });
+      }
     } else {
-      // Complex / L-Shape / N-gon: Connect corners to centroid / internal skeleton
-      points.forEach(p => {
-        ridges.push({ p1: p, p2: { x: cx, y: cy } });
+      // General Polygon Centroid
+      let cx = 0, cy = 0;
+      points.forEach(p => { cx += p.x; cy += p.y; });
+      cx /= points.length;
+      cy /= points.length;
+      const centerPt = { x: cx, y: cy };
+
+      points.forEach((p, idx) => {
+        const next = points[(idx + 1) % points.length];
+        ridges.push({ p1: p, p2: centerPt, type: 'hip' });
+        facets.push({
+          points: [p, next, centerPt],
+          type: (next.y > cy || p.y > cy) ? 'south' : 'north',
+          irradiance: (next.y > cy || p.y > cy) ? 100 : 75
+        });
       });
+
+      highLabels.push({ pt: centerPt, text: 'จุดสูงสุด (Peak +2.5m)' });
     }
 
     setRidgeLines(ridges);
+    setRoofFacets(facets);
+    setHighPointLabels(highLabels);
     setHasInnerEdges(true);
-  };
+  }, []);
 
-  // AUTO PLACE PANELS: Fits LONGi 650W panels into the polygon bounding box
-  const autoPlacePanelsOnPolygon = (points: Point[], count: number) => {
+  // AUTO PLACE PANELS on the South/Sunny slope
+  const autoPlacePanelsOnPolygon = useCallback((points: Point[], count: number) => {
     if (points.length < 3) return;
 
     const mpp = getMetersPerPixel();
-    // LONGi 650W real physical dimensions: 2.38m length, 1.13m width
+    // LONGi 650W dimensions: 2.38m length x 1.13m width
     const pW = (defaultOrientation === 'portrait' ? 1.13 : 2.38) / mpp;
     const pH = (defaultOrientation === 'portrait' ? 2.38 : 1.13) / mpp;
-    const gap = 2.5;
+    const gap = 2.0;
 
-    // Find bounding box of polygon
+    // Find bounding box
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
     points.forEach(p => {
       minX = Math.min(minX, p.x);
@@ -197,12 +302,12 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
     const availW = maxX - minX;
     const availH = maxY - minY;
 
-    // Target southern/lower area for highest solar irradiance in Thailand
-    const startX = minX + Math.max(10, (availW - count * (pW + gap)) / 2);
-    const startY = minY + availH * 0.4;
+    // Place on the southern (lower) half
+    const startX = minX + Math.max(6, (availW - Math.min(count, 8) * (pW + gap)) / 2);
+    const startY = minY + availH * 0.45;
 
     const newPanels: PlacedPanel[] = [];
-    const maxCols = Math.max(1, Math.floor((availW - 10) / (pW + gap)));
+    const maxCols = Math.max(1, Math.floor((availW - 8) / (pW + gap)));
 
     for (let i = 0; i < count; i++) {
       const col = i % maxCols;
@@ -216,9 +321,9 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
     }
 
     setPanels(newPanels);
-  };
+  }, [defaultOrientation, getMetersPerPixel]);
 
-  // Render Satellite Tiles & Roof
+  // Main Draw Satellite and Overlay Canvas
   const drawSatelliteAndRoof = useCallback(() => {
     const canvas = canvas2dRef.current;
     if (!canvas) return;
@@ -249,86 +354,92 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
     const centerY = height / 2 + panOffset.y;
 
     ctx.save();
+    // Universal transform applied to everything (Map tiles + Polygon + Panels)
     ctx.translate(centerX, centerY);
     ctx.scale(digitalScale, digitalScale);
-    ctx.translate(-centerX, -centerY);
 
     // Draw 3x3 Satellite Tiles
     for (let dx = -1; dx <= 1; dx++) {
       for (let dy = -1; dy <= 1; dy++) {
         const tileX = baseTileX + dx;
         const tileY = baseTileY + dy;
-        const posX = centerX - pixelOffsetX + dx * 256;
-        const posY = centerY - pixelOffsetY + dy * 256;
+        const posX = -pixelOffsetX + dx * 256;
+        const posY = -pixelOffsetY + dy * 256;
 
         const img = new Image();
         img.crossOrigin = 'anonymous';
         img.src = `https://mt1.google.com/vt/lyrs=s&x=${tileX}&y=${tileY}&z=${tileZoom}`;
         img.onload = () => {
-          ctx.drawImage(img, posX, posY, 256, 256);
-          renderOverlayOnly();
+          renderAllInWorldSpace();
         };
+        ctx.drawImage(img, posX, posY, 256, 256);
       }
     }
+
+    renderAllInWorldSpace();
     ctx.restore();
 
-    renderOverlayOnly();
+    // Render Stats Bar at bottom
+    renderStatsBar(ctx, width, height);
     draw3DView();
-  }, [lat, lng, zoom, digitalScale, panOffset, polygonPoints, isPolygonClosed, activeVertexIdx, hasInnerEdges, ridgeLines, panels, selectedPanelId, showIrradiance, pitchAngle, proposal.panelCount, proposal.systemSizeKwp]);
+  }, [lat, lng, zoom, digitalScale, panOffset, polygonPoints, isPolygonClosed, hasInnerEdges, ridgeLines, roofFacets, panels, selectedPanelId, showIrradiance, pitchAngle, proposal.panelCount, proposal.systemSizeKwp]);
 
-  const renderOverlayOnly = useCallback(() => {
+  // Renders the polygon, ridges, dimensions, and solar panels in World Space
+  const renderAllInWorldSpace = useCallback(() => {
     const canvas = canvas2dRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    const width = canvas.width;
-    const height = canvas.height;
-    const centerX = width / 2 + panOffset.x;
-    const centerY = height / 2 + panOffset.y;
     const mpp = getMetersPerPixel();
 
-    ctx.save();
-    ctx.translate(centerX, centerY);
+    // 1. Draw Roof Facets with Irradiance Gradient (Slopes)
+    if (hasInnerEdges && roofFacets.length > 0) {
+      roofFacets.forEach(facet => {
+        ctx.beginPath();
+        ctx.moveTo(facet.points[0].x, facet.points[0].y);
+        for (let i = 1; i < facet.points.length; i++) {
+          ctx.lineTo(facet.points[i].x, facet.points[i].y);
+        }
+        ctx.closePath();
 
-    // 1. Draw Roof Polygon Fill & Irradiance Heatmap
+        if (showIrradiance) {
+          ctx.fillStyle = facet.type === 'south' 
+            ? 'rgba(250, 204, 21, 0.70)' 
+            : facet.type === 'west' || facet.type === 'east' 
+            ? 'rgba(245, 158, 11, 0.55)' 
+            : 'rgba(217, 119, 6, 0.40)';
+        } else {
+          ctx.fillStyle = 'rgba(245, 158, 11, 0.45)';
+        }
+        ctx.fill();
+      });
+    } else if (polygonPoints.length > 2 && isPolygonClosed) {
+      // Basic Polygon Fill
+      ctx.beginPath();
+      ctx.moveTo(polygonPoints[0].x, polygonPoints[0].y);
+      for (let i = 1; i < polygonPoints.length; i++) {
+        ctx.lineTo(polygonPoints[i].x, polygonPoints[i].y);
+      }
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(250, 204, 21, 0.55)';
+      ctx.fill();
+    }
+
+    // 2. Draw Outer Polygon Boundary Lines
     if (polygonPoints.length > 1) {
       ctx.beginPath();
       ctx.moveTo(polygonPoints[0].x, polygonPoints[0].y);
       for (let i = 1; i < polygonPoints.length; i++) {
         ctx.lineTo(polygonPoints[i].x, polygonPoints[i].y);
       }
-
-      if (isPolygonClosed) {
-        ctx.closePath();
-        // Solar Irradiance Gradient (Yellow / Gold on South side)
-        const grad = ctx.createLinearGradient(0, -100, 0, 100);
-        grad.addColorStop(0, showIrradiance ? 'rgba(217, 119, 6, 0.60)' : 'rgba(245, 158, 11, 0.40)');
-        grad.addColorStop(1, showIrradiance ? 'rgba(250, 204, 21, 0.75)' : 'rgba(245, 158, 11, 0.55)');
-        ctx.fillStyle = grad;
-        ctx.fill();
-      }
-
-      // Outer Boundary Line (Cyan High-Tech)
+      if (isPolygonClosed) ctx.closePath();
       ctx.strokeStyle = '#38bdf8';
-      ctx.lineWidth = 2.5;
+      ctx.lineWidth = 2 / digitalScale;
       ctx.stroke();
 
-      // 2. Draw Auto Inner Edges / Ridge Lines (White Solid)
-      if (hasInnerEdges && ridgeLines.length > 0) {
-        ctx.strokeStyle = '#ffffff';
-        ctx.lineWidth = 2;
-        ridgeLines.forEach(ridge => {
-          ctx.beginPath();
-          ctx.moveTo(ridge.p1.x, ridge.p1.y);
-          ctx.lineTo(ridge.p2.x, ridge.p2.y);
-          ctx.stroke();
-        });
-      }
-
-      // 3. Draw Edge Dimension Labels in METERS (SolarEdge Designer Style)
-      ctx.fillStyle = '#f0fdf4';
-      ctx.font = 'bold 10px Inter, sans-serif';
+      // Dimension labels on each edge in METERS
+      ctx.font = `bold ${Math.max(8, 10 / digitalScale)}px Inter, sans-serif`;
       for (let i = 0; i < polygonPoints.length; i++) {
         const p1 = polygonPoints[i];
         const p2 = polygonPoints[(i + 1) % polygonPoints.length];
@@ -337,51 +448,75 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
           const midX = (p1.x + p2.x) / 2;
           const midY = (p1.y + p2.y) / 2;
 
-          // Dimension badge background
-          ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
-          ctx.fillRect(midX - 18, midY - 7, 36, 14);
-          ctx.strokeStyle = '#38bdf8';
-          ctx.lineWidth = 0.5;
-          ctx.strokeRect(midX - 18, midY - 7, 36, 14);
-
+          ctx.fillStyle = 'rgba(0, 0, 0, 0.80)';
+          ctx.fillRect(midX - 16 / digitalScale, midY - 6 / digitalScale, 32 / digitalScale, 12 / digitalScale);
           ctx.fillStyle = '#38bdf8';
           ctx.textAlign = 'center';
-          ctx.fillText(`${edgeLengthMeters}m`, midX, midY + 4);
+          ctx.fillText(`${edgeLengthMeters}m`, midX, midY + 3 / digitalScale);
           ctx.textAlign = 'start';
         }
       }
 
-      // 4. Draw Corner Vertex Circles (Handles)
+      // Draw Corner Vertices (Low Points / Eaves)
       polygonPoints.forEach((pt, idx) => {
-        const isHover = activeVertexIdx === idx;
-        ctx.fillStyle = isHover ? '#f59e0b' : '#38bdf8';
+        ctx.fillStyle = '#38bdf8';
         ctx.beginPath();
-        ctx.arc(pt.x, pt.y, isHover ? 6 : 4.5, 0, Math.PI * 2);
+        ctx.arc(pt.x, pt.y, 4 / digitalScale, 0, Math.PI * 2);
         ctx.fill();
         ctx.strokeStyle = '#ffffff';
-        ctx.lineWidth = 1.5;
+        ctx.lineWidth = 1.5 / digitalScale;
         ctx.stroke();
+
+        ctx.fillStyle = '#ffffff';
+        ctx.font = `bold ${Math.max(7, 9 / digitalScale)}px sans-serif`;
+        ctx.fillText(`P${idx + 1}`, pt.x + 5 / digitalScale, pt.y + 5 / digitalScale);
       });
     }
 
-    // 5. Draw Interactive Placed Solar Panels (LONGi 650W)
+    // 3. Draw Auto Inner Ridges & Hips
+    if (hasInnerEdges && ridgeLines.length > 0) {
+      ridgeLines.forEach(r => {
+        ctx.beginPath();
+        ctx.moveTo(r.p1.x, r.p1.y);
+        ctx.lineTo(r.p2.x, r.p2.y);
+        ctx.strokeStyle = r.type === 'ridge' ? '#ffffff' : 'rgba(255, 255, 255, 0.7)';
+        ctx.lineWidth = (r.type === 'ridge' ? 2.5 : 1.5) / digitalScale;
+        ctx.stroke();
+      });
+
+      // High Point Labels (สันหลังคา)
+      highPointLabels.forEach(lbl => {
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+        ctx.fillRect(lbl.pt.x - 45 / digitalScale, lbl.pt.y - 14 / digitalScale, 90 / digitalScale, 14 / digitalScale);
+        ctx.strokeStyle = '#facc15';
+        ctx.lineWidth = 1 / digitalScale;
+        ctx.strokeRect(lbl.pt.x - 45 / digitalScale, lbl.pt.y - 14 / digitalScale, 90 / digitalScale, 14 / digitalScale);
+        ctx.fillStyle = '#facc15';
+        ctx.font = `bold ${Math.max(7, 8.5 / digitalScale)}px sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.fillText(lbl.text, lbl.pt.x, lbl.pt.y - 4 / digitalScale);
+        ctx.textAlign = 'start';
+      });
+    }
+
+    // 4. Draw Solar Panels (LONGi 650W)
     panels.forEach(p => {
       const pW = (p.orientation === 'portrait' ? 1.13 : 2.38) / mpp;
       const pH = (p.orientation === 'portrait' ? 2.38 : 1.13) / mpp;
       const isSelected = selectedPanelId === p.id;
 
-      // Dark Blue N-Type Solar Cell
-      ctx.fillStyle = isSelected ? '#3b82f6' : '#1e3a8a';
+      // Solar Panel Cell Fill
+      ctx.fillStyle = isSelected ? '#2563eb' : '#1e3a8a';
       ctx.fillRect(p.x, p.y, pW, pH);
 
       // Aluminum Frame
       ctx.strokeStyle = isSelected ? '#fbbf24' : '#93c5fd';
-      ctx.lineWidth = isSelected ? 2 : 1;
+      ctx.lineWidth = (isSelected ? 2 : 1) / digitalScale;
       ctx.strokeRect(p.x, p.y, pW, pH);
 
-      // Panel Busbars & Grid
+      // Inner Busbars
       ctx.strokeStyle = 'rgba(147, 197, 253, 0.5)';
-      ctx.lineWidth = 0.5;
+      ctx.lineWidth = 0.5 / digitalScale;
       ctx.beginPath();
       ctx.moveTo(p.x + pW / 2, p.y);
       ctx.lineTo(p.x + pW / 2, p.y + pH);
@@ -389,10 +524,10 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
       ctx.lineTo(p.x + pW, p.y + pH / 2);
       ctx.stroke();
     });
+  }, [hasInnerEdges, roofFacets, polygonPoints, isPolygonClosed, ridgeLines, highPointLabels, panels, selectedPanelId, showIrradiance, digitalScale, getMetersPerPixel]);
 
-    ctx.restore();
-
-    // SolarEdge Designer Bottom Stats Bar
+  // Bottom Stats Bar
+  const renderStatsBar = (ctx: CanvasRenderingContext2D, width: number, height: number) => {
     ctx.fillStyle = 'rgba(0, 0, 0, 0.90)';
     ctx.fillRect(0, height - 38, width, 38);
 
@@ -409,11 +544,7 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
 
     ctx.fillStyle = '#38bdf8';
     ctx.fillText(`EST. ANNUAL PRODUCTION: ${estMwh} MWh`, width - 235, height - 15);
-  }, [polygonPoints, isPolygonClosed, activeVertexIdx, hasInnerEdges, ridgeLines, panels, selectedPanelId, showIrradiance, getMetersPerPixel, panOffset, proposal.panelCount]);
-
-  useEffect(() => {
-    drawSatelliteAndRoof();
-  }, [drawSatelliteAndRoof]);
+  };
 
   // Draw 3D Perspective View
   const draw3DView = () => {
@@ -425,11 +556,11 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
     const width = canvas.width;
     const height = canvas.height;
 
-    // Dark 3D Space Background
+    // Dark 3D Background
     ctx.fillStyle = '#090d16';
     ctx.fillRect(0, 0, width, height);
 
-    // 3D Perspective Grid
+    // Perspective Grid
     ctx.strokeStyle = '#1e293b';
     ctx.lineWidth = 1;
     for (let i = -width; i < width * 2; i += 45) {
@@ -450,7 +581,7 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
     ctx.lineWidth = 2;
     ctx.strokeRect(-110, -30, 220, 110);
 
-    // 3D Slopes with Irradiance Heatmap
+    // 3D Roof Slopes with Irradiance Heatmap
     const grad1 = ctx.createLinearGradient(-100, 0, 100, 60);
     grad1.addColorStop(0, '#fbbf24');
     grad1.addColorStop(1, '#f59e0b');
@@ -492,18 +623,13 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
     ctx.fillText(`LONGi Hi-MO X10 650W • N-Type BC-CELL`, width - 250, height - 15);
   };
 
-  // Mouse Interaction: Clicking corners, Dragging vertices, Dragging panels, Panning map
-  const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    const canvas = canvas2dRef.current;
-    if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const clickX = e.clientX - rect.left;
-    const clickY = e.clientY - rect.top;
+  useEffect(() => {
+    drawSatelliteAndRoof();
+  }, [drawSatelliteAndRoof]);
 
-    const centerX = canvas.width / 2 + panOffset.x;
-    const centerY = canvas.height / 2 + panOffset.y;
-    const relX = clickX - centerX;
-    const relY = clickY - centerY;
+  // Mouse Down Event Handler
+  const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const pt = getCanvasCoords(e);
     const mpp = getMetersPerPixel();
 
     if (activeTool === 'pan-map') {
@@ -514,19 +640,20 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
 
     if (activeTool === 'draw-roof') {
       if (isPolygonClosed) {
-        // If already closed, restart drawing
-        setPolygonPoints([{ x: relX, y: relY }]);
+        // Restart drawing with first point
+        setPolygonPoints([pt]);
         setIsPolygonClosed(false);
         setHasInnerEdges(false);
         setRidgeLines([]);
+        setRoofFacets([]);
         return;
       }
 
-      // Check if clicking near first point to close polygon
+      // Check if clicking near first point to close
       if (polygonPoints.length >= 3) {
         const first = polygonPoints[0];
-        const dist = Math.hypot(first.x - relX, first.y - relY);
-        if (dist < 15) {
+        const dist = Math.hypot(first.x - pt.x, first.y - pt.y);
+        if (dist < 15 / digitalScale) {
           setIsPolygonClosed(true);
           computeInnerEdges(polygonPoints);
           autoPlacePanelsOnPolygon(polygonPoints, proposal.panelCount || 6);
@@ -536,36 +663,29 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
       }
 
       // Add point
-      const nextPts = [...polygonPoints, { x: relX, y: relY }];
-      setPolygonPoints(nextPts);
-      if (nextPts.length >= 4) {
-        // Offer auto-close
+      const next = [...polygonPoints, pt];
+      setPolygonPoints(next);
+      if (next.length === 4) {
+        // Automatically close 4-point rectangle and compute inner edges
+        setIsPolygonClosed(true);
+        computeInnerEdges(next);
+        autoPlacePanelsOnPolygon(next, proposal.panelCount || 6);
+        setActiveTool('move-panels');
       }
       return;
     }
 
-    if (activeTool === 'edit-vertices') {
-      // Find closest vertex
-      for (let i = 0; i < polygonPoints.length; i++) {
-        const pt = polygonPoints[i];
-        if (Math.hypot(pt.x - relX, pt.y - relY) < 12) {
-          setActiveVertexIdx(i);
-          return;
-        }
-      }
-    }
-
     if (activeTool === 'move-panels') {
-      // Check if clicking on an existing panel to drag it
+      // Check if clicked inside a panel to drag it
       for (let i = panels.length - 1; i >= 0; i--) {
         const p = panels[i];
         const pW = (p.orientation === 'portrait' ? 1.13 : 2.38) / mpp;
         const pH = (p.orientation === 'portrait' ? 2.38 : 1.13) / mpp;
 
-        if (relX >= p.x && relX <= p.x + pW && relY >= p.y && relY <= p.y + pH) {
+        if (pt.x >= p.x && pt.x <= p.x + pW && pt.y >= p.y && pt.y <= p.y + pH) {
           setSelectedPanelId(p.id);
           setDraggingPanelId(p.id);
-          setPanelDragOffset({ x: relX - p.x, y: relY - p.y });
+          setPanelDragOffset({ x: pt.x - p.x, y: pt.y - p.y });
           return;
         }
       }
@@ -574,16 +694,6 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
   };
 
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    const canvas = canvas2dRef.current;
-    if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const clickX = e.clientX - rect.left;
-    const clickY = e.clientY - rect.top;
-    const centerX = canvas.width / 2 + panOffset.x;
-    const centerY = canvas.height / 2 + panOffset.y;
-    const relX = clickX - centerX;
-    const relY = clickY - centerY;
-
     if (isMapDragging && activeTool === 'pan-map') {
       setPanOffset({
         x: e.clientX - dragStart.x,
@@ -592,21 +702,14 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
       return;
     }
 
-    if (activeVertexIdx !== null && activeTool === 'edit-vertices') {
-      const updated = [...polygonPoints];
-      updated[activeVertexIdx] = { x: relX, y: relY };
-      setPolygonPoints(updated);
-      if (hasInnerEdges) computeInnerEdges(updated);
-      return;
-    }
-
     if (draggingPanelId !== null && activeTool === 'move-panels') {
+      const pt = getCanvasCoords(e);
       setPanels(prev => prev.map(p => {
         if (p.id === draggingPanelId) {
           return {
             ...p,
-            x: relX - panelDragOffset.x,
-            y: relY - panelDragOffset.y
+            x: pt.x - panelDragOffset.x,
+            y: pt.y - panelDragOffset.y
           };
         }
         return p;
@@ -616,7 +719,6 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
 
   const handleMouseUp = () => {
     setIsMapDragging(false);
-    setActiveVertexIdx(null);
     setDraggingPanelId(null);
   };
 
@@ -630,7 +732,7 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
     }
   };
 
-  // Rotate selected panel or all panels
+  // Rotate panels
   const handleRotatePanels = () => {
     if (selectedPanelId) {
       setPanels(prev => prev.map(p => {
@@ -640,10 +742,11 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
         return p;
       }));
     } else {
-      setDefaultOrientation(prev => prev === 'portrait' ? 'landscape' : 'portrait');
+      const nextOri = defaultOrientation === 'portrait' ? 'landscape' : 'portrait';
+      setDefaultOrientation(nextOri);
       setPanels(prev => prev.map(p => ({
         ...p,
-        orientation: p.orientation === 'portrait' ? 'landscape' : 'portrait'
+        orientation: nextOri
       })));
     }
   };
@@ -665,7 +768,7 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
     setActiveTool('move-panels');
   };
 
-  // Remove Selected Panel
+  // Remove Panel
   const handleRemovePanel = () => {
     if (selectedPanelId) {
       setPanels(panels.filter(p => p.id !== selectedPanelId));
@@ -696,11 +799,11 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
               <h3 className="text-lg font-black tracking-tight text-white">Solar Designer Studio</h3>
               <span className="bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[10px] font-bold px-2.5 py-0.5 rounded-full flex items-center gap-1">
                 <Sparkles className="w-3 h-3" />
-                <span>วาดขอบ + สันหลังคา + ขยับแผงได้อิสระ</span>
+                <span>Pixel-Perfect Precision</span>
               </span>
             </div>
             <p className="text-xs text-slate-400 mt-0.5">
-              คลิกจุดวาดขอบหลังคาบ้านจริงบนแผนที่ดาวเทียม กดสร้างสันหลังคา และลากขยับตำแหน่งแผงได้เหมือน SolarEdge
+              คลิกมุมขอบหลังคาบ้านจริง 4 จุด → ระบบคำนวณสันหลังคา จุดสูง-ต่ำ และวางแผงให้อัตโนมัติทันที
             </p>
           </div>
         </div>
@@ -716,19 +819,19 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
       </div>
 
       {/* Interactive Tool Selection Bar */}
-      <div className="bg-slate-950 p-2 rounded-2xl border border-slate-800 flex flex-wrap items-center justify-between gap-2 text-xs">
-        <div className="flex items-center gap-1.5">
+      <div className="bg-slate-950 p-2.5 rounded-2xl border border-slate-800 flex flex-wrap items-center justify-between gap-2 text-xs">
+        <div className="flex items-center gap-2">
           <button
             type="button"
             onClick={() => setActiveTool('draw-roof')}
-            className={`flex items-center gap-1.5 px-3 py-2 rounded-xl font-bold transition cursor-pointer ${
+            className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl font-bold transition cursor-pointer ${
               activeTool === 'draw-roof'
-                ? 'bg-blue-600 text-white shadow-sm'
+                ? 'bg-blue-600 text-white shadow-sm ring-1 ring-blue-400'
                 : 'bg-slate-900 text-slate-400 hover:text-slate-200'
             }`}
           >
             <PenTool className="w-4 h-4" />
-            <span>1. คลิกวาดขอบหลังคา ({polygonPoints.length} จุด)</span>
+            <span>1. คลิกวาดขอบหลังคา ({polygonPoints.length}/4 จุด)</span>
           </button>
 
           <button
@@ -737,43 +840,32 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
               if (polygonPoints.length >= 3) {
                 setIsPolygonClosed(true);
                 computeInnerEdges(polygonPoints);
+                autoPlacePanelsOnPolygon(polygonPoints, proposal.panelCount || 6);
+                setActiveTool('move-panels');
               }
             }}
             disabled={polygonPoints.length < 3}
-            className={`flex items-center gap-1.5 px-3 py-2 rounded-xl font-bold transition cursor-pointer ${
+            className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl font-bold transition cursor-pointer ${
               hasInnerEdges
                 ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
                 : 'bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-white shadow-sm'
             }`}
           >
             <Wand2 className="w-4 h-4" />
-            <span>2. Auto Inner Edge (สร้างสันหลังคา & ความชัน)</span>
+            <span>2. Auto Inner Edge (สร้างสันหลังคา & จุดสูง-ต่ำ)</span>
           </button>
 
           <button
             type="button"
             onClick={() => setActiveTool('move-panels')}
-            className={`flex items-center gap-1.5 px-3 py-2 rounded-xl font-bold transition cursor-pointer ${
+            className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl font-bold transition cursor-pointer ${
               activeTool === 'move-panels'
-                ? 'bg-emerald-600 text-white shadow-sm'
+                ? 'bg-emerald-600 text-white shadow-sm ring-1 ring-emerald-400'
                 : 'bg-slate-900 text-slate-400 hover:text-slate-200'
             }`}
           >
             <MousePointer className="w-4 h-4" />
-            <span>3. ลากขยับแผง ({panels.length} แผง)</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setActiveTool('edit-vertices')}
-            className={`flex items-center gap-1.5 px-3 py-2 rounded-xl font-bold transition cursor-pointer ${
-              activeTool === 'edit-vertices'
-                ? 'bg-indigo-600 text-white shadow-sm'
-                : 'bg-slate-900 text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <Move className="w-4 h-4" />
-            <span>ปรับขยับมุม</span>
+            <span>3. ลากขยับตำแหน่งแผง ({panels.length} แผง)</span>
           </button>
 
           <button
@@ -785,12 +877,12 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
                 : 'bg-slate-900 text-slate-400 hover:text-slate-200'
             }`}
           >
-            <Layers className="w-4 h-4" />
+            <Move className="w-4 h-4" />
             <span>เลื่อนแผนที่</span>
           </button>
         </div>
 
-        {/* Quick Presets */}
+        {/* Quick Presets & Clear */}
         <div className="flex items-center gap-1.5">
           <span className="text-[10px] text-slate-500 font-bold uppercase">โครงสำเร็จ:</span>
           <button
@@ -814,6 +906,7 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
               setIsPolygonClosed(false);
               setHasInnerEdges(false);
               setRidgeLines([]);
+              setRoofFacets([]);
               setPanels([]);
             }}
             className="p-1 text-rose-400 hover:text-rose-300 transition cursor-pointer"
@@ -838,12 +931,12 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
                 </span>
                 {activeTool === 'draw-roof' && (
                   <span className="bg-blue-500/20 text-blue-300 border border-blue-500/40 text-[10px] px-2 py-0.5 rounded-full animate-pulse">
-                    คลิกบนหลังคาบ้านเพื่อปักจุดมุม
+                    คลิกมุมที่ {polygonPoints.length + 1} ของหลังคาบ้าน
                   </span>
                 )}
                 {activeTool === 'move-panels' && (
                   <span className="bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[10px] px-2 py-0.5 rounded-full">
-                    คลิกค้างแล้วลากแผงเพื่อย้ายตำแหน่ง
+                    คลิกลากแผงเพื่อย้ายตำแหน่ง
                   </span>
                 )}
               </div>
@@ -897,9 +990,9 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
             <div className="flex justify-between items-center mb-2 px-1 text-xs">
               <span className="font-bold text-indigo-400 flex items-center gap-1.5">
                 <Sparkles className="w-3.5 h-3.5" />
-                <span>3D Roof Perspective & Heatmap</span>
+                <span>3D Roof Perspective & Elevation Model</span>
               </span>
-              <span className="text-[10px] text-amber-400">มุมเอียง {pitchAngle}° (ทิศใต้รับแดด 100%)</span>
+              <span className="text-[10px] text-amber-400">จุดสูงสุด +2.5m (ทิศใต้รับแดด 100%)</span>
             </div>
             <canvas
               ref={canvas3dRef}
@@ -957,8 +1050,34 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
             </div>
           </div>
 
-          {/* Roof Pitch & Irradiance */}
-          <div className="pt-3 border-t border-slate-700 space-y-3 text-xs">
+          {/* Elevation & Slope Details */}
+          <div className="bg-slate-900/90 rounded-2xl p-4 border border-slate-700 space-y-2 text-xs">
+            <h4 className="font-bold text-amber-300 flex items-center gap-1.5">
+              <TrendingUp className="w-4 h-4" />
+              <span>การคำนวณจุดสูง-ต่ำและทิศทางลาดเอียง (Elevation & Slope)</span>
+            </h4>
+            <div className="space-y-1 text-slate-300 text-[11px]">
+              <div className="flex justify-between">
+                <span>• สันหลังคา (Ridge - จุดสูงสุด):</span>
+                <strong className="text-amber-400">+2.50 เมตร</strong>
+              </div>
+              <div className="flex justify-between">
+                <span>• ชายคา (Eaves - จุดต่ำสุด):</span>
+                <strong className="text-slate-400">0.00 เมตร</strong>
+              </div>
+              <div className="flex justify-between">
+                <span>• มุมเอียงหลังคา (Pitch Angle):</span>
+                <strong className="text-cyan-300">{pitchAngle}°</strong>
+              </div>
+              <div className="flex justify-between">
+                <span>• ระนาบรับแดดหลัก (Optimal Slope):</span>
+                <strong className="text-emerald-400">ทิศใต้ (South 100% Irradiance)</strong>
+              </div>
+            </div>
+          </div>
+
+          {/* Roof Pitch & Irradiance Toggle */}
+          <div className="space-y-3 text-xs">
             <div>
               <label className="block text-slate-400 mb-1">ความชันหลังคา (Pitch Angle)</label>
               <select
@@ -994,12 +1113,12 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
           <div className="bg-cyan-950/40 border border-cyan-900/60 rounded-xl p-3.5 text-xs space-y-2 text-slate-300">
             <div className="flex items-center gap-1.5 font-bold text-cyan-300">
               <HelpCircle className="w-4 h-4" />
-              <span>วิธีใช้งานระบบ (เหมือน SolarEdge):</span>
+              <span>วิธีใช้งาน:</span>
             </div>
             <ol className="list-decimal list-inside space-y-1 text-[11px] text-slate-400">
-              <li>คลิกปุ่ม <strong>"1. คลิกวาดขอบหลังคา"</strong> แล้วคลิกที่มุมหลังคาจริงทั้ง 4 ด้าน</li>
-              <li>คลิกปุ่ม <strong>"2. Auto Inner Edge"</strong> เพื่อสร้างสันหลังคา & ความชัน</li>
-              <li>คลิกปุ่ม <strong>"วางแผงอัตโนมัติ"</strong> หรือลากขยับตำแหน่งแผงได้อิสระ</li>
+              <li>คลิกมุมหลังคาจริง 4 จุดบนแผนที่ดาวเทียม</li>
+              <li>ระบบจะคำนวณสันหลังคา (Ridge) และวางแผง LONGi 650W ลงในทิศใต้ให้อัตโนมัติ</li>
+              <li>คลิกลากขยับตำแหน่งแผงได้ตามต้องการ</li>
             </ol>
           </div>
         </div>
