@@ -1,6 +1,7 @@
-import React from 'react';
+import React, { useState } from 'react';
 import type { ProposalProject, SiteMedia } from '../../types/proposal';
-import { Image as ImageIcon, Upload, Trash2, ExternalLink, Sparkles } from 'lucide-react';
+import { SmartRoofStudio } from './SmartRoofStudio';
+import { Image as ImageIcon, Upload, Trash2, Sparkles, Wand2, ChevronDown, ChevronUp } from 'lucide-react';
 
 interface StepImagesProps {
   proposal: ProposalProject;
@@ -9,6 +10,7 @@ interface StepImagesProps {
 
 export const StepImages: React.FC<StepImagesProps> = ({ proposal, onChange }) => {
   const { media } = proposal;
+  const [showSmartStudio, setShowSmartStudio] = useState<boolean>(true);
 
   const handleUpdateMedia = (field: keyof SiteMedia, value: any) => {
     onChange({
@@ -18,6 +20,18 @@ export const StepImages: React.FC<StepImagesProps> = ({ proposal, onChange }) =>
         [field]: value
       }
     });
+  };
+
+  const handleApplySmartRoof = (data2d: string, data3d: string) => {
+    onChange({
+      ...proposal,
+      media: {
+        ...proposal.media,
+        roofDesignTop: data2d,
+        roofDesignIso: data3d
+      }
+    });
+    alert('✅ บันทึกภาพจำลอง 2D Top-down และ 3D Perspective เข้าสู่ Proposal หน้า 4-5 เรียบร้อยแล้ว!');
   };
 
   const handleFileUpload = (field: keyof SiteMedia, e: React.ChangeEvent<HTMLInputElement>) => {
@@ -51,22 +65,16 @@ export const StepImages: React.FC<StepImagesProps> = ({ proposal, onChange }) =>
   };
 
   const loadSampleDemoImages = () => {
-    // High quality architectural & solar rooftop demo illustrations
     const sampleCover = 'https://images.unsplash.com/photo-1513694203232-719a280e022f?auto=format&fit=crop&w=1200&q=80';
     const sampleSite1 = 'https://images.unsplash.com/photo-1592833159155-c62df1b65634?auto=format&fit=crop&w=800&q=80';
     const sampleSite2 = 'https://images.unsplash.com/photo-1508873696983-2df5293cb32f?auto=format&fit=crop&w=800&q=80';
-    const sampleRoof2D = 'https://images.unsplash.com/photo-1613665813446-82a78c468a1d?auto=format&fit=crop&w=800&q=80';
-    const sampleRoof3D = 'https://images.unsplash.com/photo-1509391365360-2e959784a276?auto=format&fit=crop&w=800&q=80';
 
     onChange({
       ...proposal,
       media: {
+        ...proposal.media,
         coverPhoto: sampleCover,
         sitePhotos: [sampleSite1, sampleSite2],
-        roofDesignTop: sampleRoof2D,
-        roofDesignIso: sampleRoof3D,
-        roofDesignAdditional: [],
-        electricBillPhoto: ''
       }
     });
   };
@@ -80,8 +88,8 @@ export const StepImages: React.FC<StepImagesProps> = ({ proposal, onChange }) =>
             <ImageIcon className="w-5 h-5 text-sky-300" />
           </div>
           <div>
-            <h2 className="text-xl font-bold">จัดการรูปภาพหน้างาน และ SolarEdge Designer</h2>
-            <p className="text-xs text-blue-200">อัปโหลดรูปบ้านลูกค้า, ภาพจำลองการวางแผง 3D และบิลค่าไฟฟ้า</p>
+            <h2 className="text-xl font-bold">จัดการรูปภาพหน้างาน และโมเดลหลังคา 3D</h2>
+            <p className="text-xs text-blue-200">สร้างโมเดลหลังคาและวางแผงอัตโนมัติด้วย Smart Roof Studio หรืออัปโหลดรูปภาพ</p>
           </div>
         </div>
 
@@ -91,35 +99,48 @@ export const StepImages: React.FC<StepImagesProps> = ({ proposal, onChange }) =>
           className="flex items-center gap-1.5 bg-amber-500 hover:bg-amber-600 text-white text-xs font-bold px-3.5 py-2 rounded-xl shadow transition cursor-pointer"
         >
           <Sparkles className="w-4 h-4" />
-          <span>ใส่รูปตัวอย่างสำหรับทดสอบ</span>
+          <span>ใส่รูปถ่ายหน้างานตัวอย่าง</span>
         </button>
       </div>
 
-      {/* SolarEdge Designer Shortcut Helper */}
-      <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-full bg-amber-500 text-white flex items-center justify-center font-bold text-xs">
-            SE
+      {/* SMART ROOF & AUTO PV STUDIO SECTION */}
+      <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm space-y-4">
+        <div className="flex justify-between items-center">
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-amber-500 to-orange-500 text-white flex items-center justify-center shadow-sm">
+              <Wand2 className="w-4 h-4" />
+            </div>
+            <div>
+              <h3 className="font-extrabold text-base text-slate-800">
+                ระบบสร้างหลังคา & วางแผงอัตโนมัติ (Smart Roof Studio)
+              </h3>
+              <p className="text-xs text-slate-500">
+                แทนที่การทำใน SolarEdge Designer: ปรับทรงหลังคา หมุนองศา และกดบันทึกเข้า Proposal ได้ทันที 100%
+              </p>
+            </div>
           </div>
-          <div>
-            <h4 className="font-bold text-xs text-amber-950">ขั้นตอนการดึงรูปจาก SolarEdge Designer</h4>
-            <p className="text-[11px] text-amber-800">
-              1. เปิด SolarEdge Designer &nbsp;→&nbsp; 2. วางแผงบนหลังคา &nbsp;→&nbsp; 3. แคปรูปหน้าจอ (2D และ 3D) &nbsp;→&nbsp; 4. นำมาอัปโหลดด้านล่างนี้
-            </p>
-          </div>
+
+          <button
+            type="button"
+            onClick={() => setShowSmartStudio(!showSmartStudio)}
+            className="flex items-center gap-1 text-xs font-bold text-slate-600 hover:text-slate-900 bg-slate-100 px-3 py-1.5 rounded-xl border border-slate-200 cursor-pointer"
+          >
+            <span>{showSmartStudio ? 'ซ่อนเครื่องมือ' : 'เปิดเครื่องมือออกแบบ'}</span>
+            {showSmartStudio ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+          </button>
         </div>
-        <a
-          href="https://designer.solaredge.com/"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="flex items-center gap-1 bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold px-3 py-1.5 rounded-lg shadow-sm transition"
-        >
-          <span>เปิด Designer</span>
-          <ExternalLink className="w-3.5 h-3.5" />
-        </a>
+
+        {showSmartStudio && (
+          <div className="mt-4">
+            <SmartRoofStudio
+              proposal={proposal}
+              onApply={handleApplySmartRoof}
+            />
+          </div>
+        )}
       </div>
 
-      {/* Image Upload Sections */}
+      {/* Manual Upload Sections (If user also has custom photos) */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         {/* 1. Cover Photo */}
         <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm space-y-3">
@@ -159,87 +180,11 @@ export const StepImages: React.FC<StepImagesProps> = ({ proposal, onChange }) =>
           </div>
         </div>
 
-        {/* 2. SolarEdge 2D Top-Down */}
+        {/* 2. Electricity Bill Photo */}
         <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm space-y-3">
           <div className="flex justify-between items-center">
             <h3 className="font-bold text-sm text-slate-800 flex items-center gap-2">
-              <span className="w-5 h-5 rounded-full bg-sky-100 text-sky-700 text-xs flex items-center justify-center font-bold">2</span>
-              <span>SolarEdge: 2D Layout (Top-Down)</span>
-            </h3>
-            {media.roofDesignTop && (
-              <button
-                type="button"
-                onClick={() => handleUpdateMedia('roofDesignTop', '')}
-                className="text-rose-500 hover:text-rose-700 text-xs flex items-center gap-1 cursor-pointer"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-                <span>ลบ</span>
-              </button>
-            )}
-          </div>
-
-          <div className="h-52 bg-slate-900 border-2 border-dashed border-slate-700 rounded-xl overflow-hidden relative flex flex-col items-center justify-center">
-            {media.roofDesignTop ? (
-              <img src={media.roofDesignTop} alt="SolarEdge 2D" className="w-full h-full object-contain" />
-            ) : (
-              <label className="w-full h-full flex flex-col items-center justify-center cursor-pointer hover:bg-slate-800/80 transition p-4 text-center">
-                <Upload className="w-8 h-8 text-sky-400 mb-2 opacity-80" />
-                <span className="text-xs font-semibold text-slate-200">อัปโหลดภาพจำลองการจัดวางแผง 2D</span>
-                <span className="text-[10px] text-slate-400 mt-0.5">ภาพมุมมอง Top-down จาก SolarEdge</span>
-                <input
-                  type="file"
-                  accept="image/*"
-                  onChange={(e) => handleFileUpload('roofDesignTop', e)}
-                  className="hidden"
-                />
-              </label>
-            )}
-          </div>
-        </div>
-
-        {/* 3. SolarEdge 3D Isometric */}
-        <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm space-y-3">
-          <div className="flex justify-between items-center">
-            <h3 className="font-bold text-sm text-slate-800 flex items-center gap-2">
-              <span className="w-5 h-5 rounded-full bg-indigo-100 text-indigo-700 text-xs flex items-center justify-center font-bold">3</span>
-              <span>SolarEdge: 3D Roof Model (Isometric)</span>
-            </h3>
-            {media.roofDesignIso && (
-              <button
-                type="button"
-                onClick={() => handleUpdateMedia('roofDesignIso', '')}
-                className="text-rose-500 hover:text-rose-700 text-xs flex items-center gap-1 cursor-pointer"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-                <span>ลบ</span>
-              </button>
-            )}
-          </div>
-
-          <div className="h-52 bg-slate-900 border-2 border-dashed border-slate-700 rounded-xl overflow-hidden relative flex flex-col items-center justify-center">
-            {media.roofDesignIso ? (
-              <img src={media.roofDesignIso} alt="SolarEdge 3D" className="w-full h-full object-contain" />
-            ) : (
-              <label className="w-full h-full flex flex-col items-center justify-center cursor-pointer hover:bg-slate-800/80 transition p-4 text-center">
-                <Upload className="w-8 h-8 text-indigo-400 mb-2 opacity-80" />
-                <span className="text-xs font-semibold text-slate-200">อัปโหลดภาพโมเดลหลังคา 3D</span>
-                <span className="text-[10px] text-slate-400 mt-0.5">ภาพมุมมอง Isometric 3D จาก SolarEdge</span>
-                <input
-                  type="file"
-                  accept="image/*"
-                  onChange={(e) => handleFileUpload('roofDesignIso', e)}
-                  className="hidden"
-                />
-              </label>
-            )}
-          </div>
-        </div>
-
-        {/* 4. Electricity Bill Photo */}
-        <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm space-y-3">
-          <div className="flex justify-between items-center">
-            <h3 className="font-bold text-sm text-slate-800 flex items-center gap-2">
-              <span className="w-5 h-5 rounded-full bg-amber-100 text-amber-700 text-xs flex items-center justify-center font-bold">4</span>
+              <span className="w-5 h-5 rounded-full bg-amber-100 text-amber-700 text-xs flex items-center justify-center font-bold">2</span>
               <span>ภาพบิลค่าไฟฟ้า (Electricity Bill)</span>
             </h3>
             {media.electricBillPhoto && (
@@ -273,11 +218,11 @@ export const StepImages: React.FC<StepImagesProps> = ({ proposal, onChange }) =>
           </div>
         </div>
 
-        {/* 5. Additional Site Photos (Up to 4) */}
+        {/* 3. Additional Site Photos (Up to 4) */}
         <div className="md:col-span-2 bg-white rounded-2xl p-5 border border-slate-200 shadow-sm space-y-3">
           <div className="flex justify-between items-center">
             <h3 className="font-bold text-sm text-slate-800 flex items-center gap-2">
-              <span className="w-5 h-5 rounded-full bg-emerald-100 text-emerald-700 text-xs flex items-center justify-center font-bold">5</span>
+              <span className="w-5 h-5 rounded-full bg-emerald-100 text-emerald-700 text-xs flex items-center justify-center font-bold">3</span>
               <span>รูปถ่ายหน้างานจริงเพิ่มเติม (Site Pictures: 2 - 4 รูป)</span>
             </h3>
             {(media.sitePhotos?.length || 0) > 0 && (
