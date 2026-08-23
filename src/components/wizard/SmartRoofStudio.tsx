@@ -11,7 +11,8 @@ import {
   PenTool, 
   Trash2, 
   Move, 
-  Sparkles
+  Sparkles,
+  Maximize2
 } from 'lucide-react';
 
 interface SmartRoofStudioProps {
@@ -39,7 +40,10 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
   const initialCoords = parseCoords();
   const [lat, setLat] = useState<number>(initialCoords.lat);
   const [lng, setLng] = useState<number>(initialCoords.lng);
-  const [zoom, setZoom] = useState<number>(19);
+  
+  // Close-up Zoom level (supports 18 to 22 with digital magnification)
+  const [zoom, setZoom] = useState<number>(20);
+  const [digitalScale, setDigitalScale] = useState<number>(1.8); // 1.0x to 3.0x close-up magnification
   const [panOffset, setPanOffset] = useState<Point>({ x: 0, y: 0 });
   const [isPanning, setIsPanning] = useState<boolean>(false);
   const [dragStart, setDragStart] = useState<Point>({ x: 0, y: 0 });
@@ -48,9 +52,9 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
   const [drawMode, setDrawMode] = useState<'preset' | 'polygon'>('preset');
   const [customPoints, setCustomPoints] = useState<Point[]>([]);
 
-  // Preset box params
-  const [boxWidth, setBoxWidth] = useState<number>(180);
-  const [boxHeight, setBoxHeight] = useState<number>(120);
+  // Real-world physical dimensions in METERS
+  const [roofWidthMeters, setRoofWidthMeters] = useState<number>(10.0);
+  const [roofLengthMeters, setRoofLengthMeters] = useState<number>(14.0);
   const [rotation, setRotation] = useState<number>(15);
   const [roofType, setRoofType] = useState<'gable' | 'hip' | 'l-shape' | 'shed'>('gable');
   const [panelOrientation, setPanelOrientation] = useState<'portrait' | 'landscape'>('portrait');
@@ -60,6 +64,13 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
   const canvas2dRef = useRef<HTMLCanvasElement>(null);
   const canvas3dRef = useRef<HTMLCanvasElement>(null);
 
+  // Compute meters per pixel based on latitude and zoom
+  const getMetersPerPixel = useCallback(() => {
+    const latRad = (lat * Math.PI) / 180;
+    const baseMetersPerPixel = (156543.03392 * Math.cos(latRad)) / Math.pow(2, zoom);
+    return baseMetersPerPixel / digitalScale;
+  }, [lat, zoom, digitalScale]);
+
   // Synchronize when proposal coordinates change
   useEffect(() => {
     const c = parseCoords();
@@ -68,7 +79,7 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
     setPanOffset({ x: 0, y: 0 });
   }, [proposal.customer.coordinates]);
 
-  // Load satellite image tiles
+  // Load satellite image tiles and render roof
   const drawSatelliteAndRoof = useCallback(() => {
     const canvas = canvas2dRef.current;
     if (!canvas) return;
@@ -82,8 +93,9 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
     ctx.fillStyle = '#0f172a';
     ctx.fillRect(0, 0, width, height);
 
-    // Calculate center tile coordinates in Web Mercator
-    const n = Math.pow(2, zoom);
+    // Tile Zoom math
+    const tileZoom = Math.min(20, zoom);
+    const n = Math.pow(2, tileZoom);
     const centerTileX = ((lng + 180) / 360) * n;
     const latRad = (lat * Math.PI) / 180;
     const centerTileY = ((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) * n;
@@ -97,6 +109,12 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
     const centerX = width / 2 + panOffset.x;
     const centerY = height / 2 + panOffset.y;
 
+    ctx.save();
+    // Apply digital close-up magnification from center
+    ctx.translate(centerX, centerY);
+    ctx.scale(digitalScale, digitalScale);
+    ctx.translate(-centerX, -centerY);
+
     // Draw 3x3 Satellite Tiles
     for (let dx = -1; dx <= 1; dx++) {
       for (let dy = -1; dy <= 1; dy++) {
@@ -107,37 +125,40 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
 
         const img = new Image();
         img.crossOrigin = 'anonymous';
-        // Google Satellite Tile URL
-        img.src = `https://mt1.google.com/vt/lyrs=s&x=${tileX}&y=${tileY}&z=${zoom}`;
+        img.src = `https://mt1.google.com/vt/lyrs=s&x=${tileX}&y=${tileY}&z=${tileZoom}`;
         img.onload = () => {
           ctx.drawImage(img, posX, posY, 256, 256);
-          // Re-render roof overlay after tile loads
-          drawRoofOverlay(ctx, width, height, centerX, centerY);
+          // Redraw overlay after each tile loads
+          renderOverlayOnly();
         };
       }
     }
+    ctx.restore();
 
-    // Initial overlay render
-    drawRoofOverlay(ctx, width, height, centerX, centerY);
+    renderOverlayOnly();
     draw3DView();
-  }, [lat, lng, zoom, panOffset, drawMode, customPoints, boxWidth, boxHeight, rotation, roofType, panelOrientation, pitchAngle, showIrradiance, proposal.panelCount, proposal.systemSizeKwp]);
+  }, [lat, lng, zoom, digitalScale, panOffset, drawMode, customPoints, roofWidthMeters, roofLengthMeters, rotation, roofType, panelOrientation, pitchAngle, showIrradiance, proposal.panelCount, proposal.systemSizeKwp]);
 
-  useEffect(() => {
-    drawSatelliteAndRoof();
-  }, [drawSatelliteAndRoof]);
+  const renderOverlayOnly = useCallback(() => {
+    const canvas = canvas2dRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
 
-  const drawRoofOverlay = (
-    ctx: CanvasRenderingContext2D,
-    width: number,
-    height: number,
-    centerX: number,
-    centerY: number
-  ) => {
-    // Red Center Location Marker (if not drawing)
+    const width = canvas.width;
+    const height = canvas.height;
+    const centerX = width / 2 + panOffset.x;
+    const centerY = height / 2 + panOffset.y;
+
+    const metersPerPixel = getMetersPerPixel();
+    const boxPixelW = roofWidthMeters / metersPerPixel;
+    const boxPixelH = roofLengthMeters / metersPerPixel;
+
+    // Center Location Pin Dot
     ctx.save();
     ctx.fillStyle = '#ef4444';
     ctx.beginPath();
-    ctx.arc(centerX, centerY, 5, 0, Math.PI * 2);
+    ctx.arc(centerX, centerY, 4, 0, Math.PI * 2);
     ctx.fill();
     ctx.strokeStyle = '#fff';
     ctx.lineWidth = 1.5;
@@ -150,21 +171,21 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
     if (drawMode === 'preset') {
       ctx.rotate((rotation * Math.PI) / 180);
 
+      const halfW = boxPixelW / 2;
+      const halfH = boxPixelH / 2;
+
       // Draw Roof Facets with Sun Irradiance
       if (roofType === 'gable') {
-        // Gable Roof (จั่ว 2 สโลป)
-        const halfW = boxWidth / 2;
-        const halfH = boxHeight / 2;
-
+        // Gable Roof (จั่ว 2 ด้าน)
         // North Slope (Moderate)
         ctx.fillStyle = showIrradiance ? 'rgba(217, 119, 6, 0.65)' : 'rgba(245, 158, 11, 0.45)';
-        ctx.fillRect(-halfW, -halfH, boxWidth, halfH);
+        ctx.fillRect(-halfW, -halfH, boxPixelW, halfH);
 
         // South Slope (High Irradiance - Yellow/Gold)
         ctx.fillStyle = showIrradiance ? 'rgba(250, 204, 21, 0.75)' : 'rgba(245, 158, 11, 0.55)';
-        ctx.fillRect(-halfW, 0, boxWidth, halfH);
+        ctx.fillRect(-halfW, 0, boxPixelW, halfH);
 
-        // Ridge Line (เส้นสันจั่วกลาง)
+        // Ridge Line (สันจั่ว)
         ctx.strokeStyle = '#ffffff';
         ctx.lineWidth = 2.5;
         ctx.beginPath();
@@ -172,18 +193,24 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
         ctx.lineTo(halfW, 0);
         ctx.stroke();
 
-        // Outer Boundary
+        // Outer Boundary Box
         ctx.strokeStyle = '#38bdf8';
         ctx.lineWidth = 2;
-        ctx.strokeRect(-halfW, -halfH, boxWidth, boxHeight);
+        ctx.strokeRect(-halfW, -halfH, boxPixelW, boxPixelH);
 
-        // Draw Solar Panels (e.g. 6 or 20 panels)
-        drawPlacedPanels(ctx, -halfW + 15, 10, boxWidth - 30, halfH - 15);
+        // Real-dimension Labels in Meters
+        ctx.fillStyle = '#f0fdf4';
+        ctx.font = 'bold 10px Inter, sans-serif';
+        ctx.fillText(`${roofWidthMeters.toFixed(1)}m`, -halfW + 4, -halfH - 4);
+        ctx.fillText(`${roofLengthMeters.toFixed(1)}m`, halfW + 6, 0);
+
+        // Place Solar Panels in South Slope
+        drawPlacedPanels(ctx, -halfW + 6, 4, boxPixelW - 12, halfH - 8, metersPerPixel);
       } else if (roofType === 'l-shape') {
         // L-Shape Roof
-        const w = boxWidth;
-        const h = boxWidth;
-        const wing = boxWidth * 0.45;
+        const w = boxPixelW;
+        const h = boxPixelH;
+        const wing = boxPixelW * 0.45;
 
         ctx.fillStyle = showIrradiance ? 'rgba(250, 204, 21, 0.75)' : 'rgba(245, 158, 11, 0.55)';
         ctx.beginPath();
@@ -200,7 +227,7 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
         ctx.lineWidth = 2;
         ctx.stroke();
 
-        // Ridge lines
+        // Ridge
         ctx.strokeStyle = '#ffffff';
         ctx.lineWidth = 2;
         ctx.beginPath();
@@ -209,23 +236,20 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
         ctx.lineTo(w / 2, h / 2 - wing);
         ctx.stroke();
 
-        // Place Panels
-        drawPlacedPanels(ctx, -w / 2 + 10, h / 2 - wing + 10, w - 20, wing - 15);
+        drawPlacedPanels(ctx, -w / 2 + 6, h / 2 - wing + 6, w - 12, wing - 10, metersPerPixel);
       } else {
         // Hip / Shed Roof
-        const halfW = boxWidth / 2;
-        const halfH = boxHeight / 2;
         ctx.fillStyle = showIrradiance ? 'rgba(250, 204, 21, 0.75)' : 'rgba(245, 158, 11, 0.55)';
-        ctx.fillRect(-halfW, -halfH, boxWidth, boxHeight);
+        ctx.fillRect(-halfW, -halfH, boxPixelW, boxPixelH);
         ctx.strokeStyle = '#38bdf8';
         ctx.lineWidth = 2;
-        ctx.strokeRect(-halfW, -halfH, boxWidth, boxHeight);
+        ctx.strokeRect(-halfW, -halfH, boxPixelW, boxPixelH);
 
         // Place Panels
-        drawPlacedPanels(ctx, -halfW + 15, -halfH + 15, boxWidth - 30, boxHeight - 30);
+        drawPlacedPanels(ctx, -halfW + 6, -halfH + 6, boxPixelW - 12, boxPixelH - 12, metersPerPixel);
       }
     } else {
-      // Custom Polygon Drawn by User
+      // Custom Polygon
       if (customPoints.length > 1) {
         ctx.fillStyle = 'rgba(250, 204, 21, 0.65)';
         ctx.strokeStyle = '#38bdf8';
@@ -241,7 +265,6 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
         }
         ctx.stroke();
 
-        // Points Handles
         customPoints.forEach((p, idx) => {
           ctx.fillStyle = '#38bdf8';
           ctx.beginPath();
@@ -252,16 +275,15 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
           ctx.fillText(`${idx + 1}`, p.x + 6, p.y + 6);
         });
 
-        // If closed, draw panels in center
         if (customPoints.length >= 4) {
-          drawPlacedPanels(ctx, -60, -30, 120, 60);
+          drawPlacedPanels(ctx, -40, -20, 80, 40, metersPerPixel);
         }
       }
     }
 
     ctx.restore();
 
-    // SolarEdge Style Bottom Stats Bar
+    // Bottom Stats Bar (SolarEdge Style)
     ctx.fillStyle = 'rgba(0, 0, 0, 0.88)';
     ctx.fillRect(0, height - 38, width, 38);
 
@@ -276,19 +298,31 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
     ctx.fillStyle = '#38bdf8';
     const annualMwh = (proposal.systemSizeKwp * 1.45).toFixed(2);
     ctx.fillText(`EST. ANNUAL PRODUCTION: ${annualMwh} MWh`, width - 235, height - 15);
-  };
+  }, [drawMode, customPoints, roofWidthMeters, roofLengthMeters, rotation, roofType, panelOrientation, showIrradiance, proposal.panelCount, proposal.systemSizeKwp, getMetersPerPixel, panOffset]);
 
+  useEffect(() => {
+    drawSatelliteAndRoof();
+  }, [drawSatelliteAndRoof]);
+
+  // Draw Solar Panels matching real LONGi 650W dimensions (2.38m x 1.13m)
   const drawPlacedPanels = (
     ctx: CanvasRenderingContext2D,
     startX: number,
     startY: number,
     availW: number,
-    _availH: number
+    _availH: number,
+    metersPerPixel: number
   ) => {
     const count = proposal.panelCount || 6;
-    const pW = panelOrientation === 'portrait' ? 16 : 28;
-    const pH = panelOrientation === 'portrait' ? 28 : 16;
-    const gap = 3;
+
+    // LONGi 650W real physical dimensions: 2.38m length, 1.13m width
+    const panelPhysicalW = panelOrientation === 'portrait' ? 1.13 : 2.38;
+    const panelPhysicalH = panelOrientation === 'portrait' ? 2.38 : 1.13;
+
+    // Convert to canvas pixels
+    const pW = Math.max(10, panelPhysicalW / metersPerPixel);
+    const pH = Math.max(16, panelPhysicalH / metersPerPixel);
+    const gap = 2.5;
 
     let cols = Math.floor(availW / (pW + gap));
     if (cols < 1) cols = 1;
@@ -299,14 +333,14 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
         const px = startX + c * (pW + gap);
         const py = startY + r * (pH + gap);
 
-        // Draw Realistic Solar Panel (Blue N-Type with white frame)
+        // Draw Blue N-Type Solar Cell
         ctx.fillStyle = '#1e3a8a';
         ctx.fillRect(px, py, pW, pH);
         ctx.strokeStyle = '#93c5fd';
         ctx.lineWidth = 1;
         ctx.strokeRect(px, py, pW, pH);
 
-        // Solar Grid Lines
+        // Grid lines inside panel
         ctx.strokeStyle = 'rgba(96, 165, 250, 0.6)';
         ctx.lineWidth = 0.5;
         ctx.beginPath();
@@ -428,6 +462,18 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
     setIsPanning(false);
   };
 
+  // Mouse wheel zoom
+  const handleWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
+    e.preventDefault();
+    if (e.deltaY < 0) {
+      // Zoom in
+      setDigitalScale(prev => Math.min(3.5, prev + 0.15));
+    } else {
+      // Zoom out
+      setDigitalScale(prev => Math.max(0.8, prev - 0.15));
+    }
+  };
+
   const handleApply = () => {
     const canvas2d = canvas2dRef.current;
     const canvas3d = canvas3dRef.current;
@@ -477,25 +523,43 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
             <div className="flex justify-between items-center mb-2 px-1 text-xs">
               <span className="font-bold text-sky-400 flex items-center gap-1.5">
                 <Layers className="w-3.5 h-3.5" />
-                <span>2D Satellite View (ลากแผนที่เพื่อเล็งหลังคาบ้าน)</span>
+                <span>2D Satellite Close-Up (หมุนลูกกลิ้งเมาส์ หรือกดปุ่มซูมเพื่อขยาย)</span>
               </span>
-              <div className="flex items-center gap-1.5 bg-slate-900 px-2 py-0.5 rounded border border-slate-800">
+              
+              {/* Zoom & Magnification Controls */}
+              <div className="flex items-center gap-2 bg-slate-900 px-2.5 py-1 rounded-xl border border-slate-800">
                 <button
                   type="button"
-                  onClick={() => setZoom(prev => Math.max(17, prev - 1))}
-                  className="p-1 hover:text-sky-400 transition"
+                  onClick={() => {
+                    setDigitalScale(prev => Math.max(0.8, prev - 0.25));
+                    if (digitalScale <= 1.0) setZoom(prev => Math.max(17, prev - 1));
+                  }}
+                  className="p-1 hover:text-sky-400 transition cursor-pointer"
                   title="Zoom Out"
                 >
                   <ZoomOut className="w-3.5 h-3.5" />
                 </button>
-                <span className="font-mono text-[10px] text-slate-300 font-bold">Zoom {zoom}</span>
+                <span className="font-mono text-[10px] text-cyan-300 font-bold">
+                  {(digitalScale * 100).toFixed(0)}% ซูมใกล้
+                </span>
                 <button
                   type="button"
-                  onClick={() => setZoom(prev => Math.min(20, prev + 1))}
-                  className="p-1 hover:text-sky-400 transition"
+                  onClick={() => {
+                    setDigitalScale(prev => Math.min(3.5, prev + 0.25));
+                    if (digitalScale >= 2.0) setZoom(prev => Math.min(20, prev + 1));
+                  }}
+                  className="p-1 hover:text-sky-400 transition cursor-pointer"
                   title="Zoom In"
                 >
                   <ZoomIn className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setDigitalScale(2.0); setZoom(20); setPanOffset({ x: 0, y: 0 }); }}
+                  className="ml-1 text-[9px] bg-slate-800 hover:bg-slate-700 text-slate-300 px-1.5 py-0.5 rounded cursor-pointer"
+                  title="Reset Zoom & Center"
+                >
+                  Reset
                 </button>
               </div>
             </div>
@@ -507,7 +571,8 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
               onMouseDown={handleMouseDown}
               onMouseMove={handleMouseMove}
               onMouseUp={handleMouseUp}
-              className="w-full h-[280px] rounded-xl object-contain bg-slate-900 cursor-move"
+              onWheel={handleWheel}
+              className="w-full h-[290px] rounded-xl object-contain bg-slate-900 cursor-move"
             />
           </div>
 
@@ -523,8 +588,8 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
             <canvas
               ref={canvas3dRef}
               width={560}
-              height={260}
-              className="w-full h-[200px] rounded-xl object-contain bg-slate-900"
+              height={240}
+              className="w-full h-[190px] rounded-xl object-contain bg-slate-900"
             />
           </div>
         </div>
@@ -568,7 +633,7 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
             </div>
           </div>
 
-          {/* Preset Controls */}
+          {/* Preset Controls with REAL-WORLD METERS */}
           {drawMode === 'preset' ? (
             <div className="space-y-4 pt-2 border-t border-slate-700 text-xs">
               <div>
@@ -615,30 +680,58 @@ export const SmartRoofStudio: React.FC<SmartRoofStudioProps> = ({ proposal, onAp
                 />
               </div>
 
-              {/* Width & Height Resize */}
+              {/* Real-World Meter Dimensions */}
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-slate-400 mb-1">ความกว้างหลังคา</label>
+                  <div className="flex justify-between items-center mb-1">
+                    <label className="text-slate-400">ความกว้างหลังคา</label>
+                    <span className="text-cyan-300 font-mono font-bold">{roofWidthMeters.toFixed(1)} m</span>
+                  </div>
                   <input
                     type="range"
-                    min="80"
-                    max="280"
-                    value={boxWidth}
-                    onChange={(e) => setBoxWidth(parseInt(e.target.value))}
+                    min="3.0"
+                    max="25.0"
+                    step="0.5"
+                    value={roofWidthMeters}
+                    onChange={(e) => setRoofWidthMeters(parseFloat(e.target.value))}
                     className="w-full accent-cyan-500 cursor-pointer"
                   />
                 </div>
                 <div>
-                  <label className="block text-slate-400 mb-1">ความยาวหลังคา</label>
+                  <div className="flex justify-between items-center mb-1">
+                    <label className="text-slate-400">ความยาวหลังคา</label>
+                    <span className="text-cyan-300 font-mono font-bold">{roofLengthMeters.toFixed(1)} m</span>
+                  </div>
                   <input
                     type="range"
-                    min="60"
-                    max="220"
-                    value={boxHeight}
-                    onChange={(e) => setBoxHeight(parseInt(e.target.value))}
+                    min="4.0"
+                    max="35.0"
+                    step="0.5"
+                    value={roofLengthMeters}
+                    onChange={(e) => setRoofLengthMeters(parseFloat(e.target.value))}
                     className="w-full accent-cyan-500 cursor-pointer"
                   />
                 </div>
+              </div>
+
+              {/* Digital Zoom Slider */}
+              <div className="bg-slate-900/90 p-3 rounded-xl border border-slate-700 space-y-1.5">
+                <div className="flex justify-between items-center text-xs">
+                  <span className="font-bold text-slate-300 flex items-center gap-1">
+                    <Maximize2 className="w-3 h-3 text-emerald-400" />
+                    <span>ระยะซูมดาวเทียมเข้าใกล้ (Close-up Zoom)</span>
+                  </span>
+                  <span className="text-emerald-400 font-mono font-bold">{(digitalScale * 100).toFixed(0)}%</span>
+                </div>
+                <input
+                  type="range"
+                  min="0.8"
+                  max="3.5"
+                  step="0.1"
+                  value={digitalScale}
+                  onChange={(e) => setDigitalScale(parseFloat(e.target.value))}
+                  className="w-full accent-emerald-500 cursor-pointer"
+                />
               </div>
             </div>
           ) : (
