@@ -4,7 +4,7 @@ chrome.runtime.onInstalled.addListener(() => {
   console.log('[TNS Solar] Service Worker installed');
 });
 
-// Handle messages
+// Handle messages from content script or popup
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'SYNC_SOLAREDGE_DATA') {
     handleSyncData(message.data, sender.tab).then(result => sendResponse(result));
@@ -14,15 +14,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 async function handleSyncData(data, senderTab) {
   try {
-    // 1. Capture the exact visible tab screenshot (Full High-Resolution Image of SolarEdge Design)
+    console.log('[TNS Solar] Starting SolarEdge sync with data:', data);
+
+    // 1. Capture Visible Tab Screenshot (Crystal-Clear GPU Capture)
     let screenshotUrl = '';
-    const targetWindowId = (senderTab && senderTab.windowId) ? senderTab.windowId : null;
-    
     try {
-      screenshotUrl = await chrome.tabs.captureVisibleTab(targetWindowId, { format: 'png' });
-      console.log('[TNS Solar] Successfully captured SolarEdge visible tab screenshot');
-    } catch (err) {
-      console.warn('[TNS Solar] captureVisibleTab failed, using canvas fallback:', err);
+      if (senderTab && typeof senderTab.windowId === 'number') {
+        screenshotUrl = await chrome.tabs.captureVisibleTab(senderTab.windowId, { format: 'png' });
+      } else {
+        const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (activeTab && typeof activeTab.windowId === 'number') {
+          screenshotUrl = await chrome.tabs.captureVisibleTab(activeTab.windowId, { format: 'png' });
+        } else {
+          screenshotUrl = await chrome.tabs.captureVisibleTab({ format: 'png' });
+        }
+      }
+      console.log('[TNS Solar] Screenshot captured successfully, length:', screenshotUrl.length);
+    } catch (captureErr) {
+      console.warn('[TNS Solar] captureVisibleTab failed:', captureErr);
       screenshotUrl = data.canvasDataUrl || '';
     }
 
@@ -31,12 +40,12 @@ async function handleSyncData(data, senderTab) {
       canvasDataUrl: screenshotUrl || data.canvasDataUrl || ''
     };
 
-    // 2. Store in chrome.storage.local
+    // 2. Persist in chrome.storage.local
     await chrome.storage.local.set({ lastSyncedSolarEdge: finalPayload });
 
-    // 3. Query for open TNS Solar Proposal tabs
-    const tabs = await chrome.tabs.query({});
-    const tnsTab = tabs.find(t => 
+    // 3. Find any open TNS Solar Proposal tabs
+    const allTabs = await chrome.tabs.query({});
+    const tnsTab = allTabs.find(t => 
       t.url && (
         t.url.includes('nuttathusch.github.io/tns-solar-proposal') ||
         t.url.includes('localhost:5173') ||
@@ -44,54 +53,63 @@ async function handleSyncData(data, senderTab) {
       )
     );
 
-    if (tnsTab && tnsTab.id) {
-      // Focus the open TNS Proposal tab
+    if (tnsTab && typeof tnsTab.id === 'number') {
+      console.log('[TNS Solar] Found open TNS Proposal tab:', tnsTab.id, tnsTab.url);
+
+      // Focus the TNS tab
       await chrome.tabs.update(tnsTab.id, { active: true });
-      if (tnsTab.windowId) {
+      if (typeof tnsTab.windowId === 'number') {
         await chrome.windows.update(tnsTab.windowId, { focused: true });
       }
 
-      // Send data to TNS Proposal web app
-      await chrome.tabs.sendMessage(tnsTab.id, {
-        action: 'INJECT_SOLAREDGE_PROPOSAL_DATA',
-        payload: finalPayload
-      }).catch(err => {
-        console.log('Direct script injection to existing tab:', err);
-        chrome.scripting.executeScript({
-          target: { tabId: tnsTab.id },
-          func: (syncPayload) => {
-            window.postMessage({ type: 'TNS_SOLAREDGE_SYNC', payload: syncPayload }, '*');
-            localStorage.setItem('tns_solaredge_latest_sync', JSON.stringify(syncPayload));
-          },
-          args: [finalPayload]
-        });
+      // Execute script to post message and update localStorage in page context
+      await chrome.scripting.executeScript({
+        target: { tabId: tnsTab.id },
+        func: (syncData) => {
+          console.log('[TNS Page] Injected SolarEdge sync data:', syncData);
+          window.postMessage({ type: 'TNS_SOLAREDGE_SYNC', payload: syncData }, '*');
+          try {
+            localStorage.setItem('tns_solaredge_latest_sync', JSON.stringify(syncData));
+            // Trigger storage event manually for same-tab listener
+            window.dispatchEvent(new Event('tns_solaredge_sync_event'));
+          } catch (e) {
+            console.error('Failed to set localStorage in page:', e);
+          }
+        },
+        args: [finalPayload]
       });
 
       return { success: true, tabAction: 'updated_existing' };
     } else {
-      // Open new TNS Proposal tab
+      console.log('[TNS Solar] No open TNS tab found, opening new tab...');
+      // Open new tab
       const newTab = await chrome.tabs.create({
         url: 'https://nuttathusch.github.io/tns-solar-proposal/'
       });
 
-      // Inject data once loaded
+      // Inject data once tab is ready
       setTimeout(async () => {
-        if (newTab.id) {
+        if (newTab && typeof newTab.id === 'number') {
           await chrome.scripting.executeScript({
             target: { tabId: newTab.id },
-            func: (syncPayload) => {
-              window.postMessage({ type: 'TNS_SOLAREDGE_SYNC', payload: syncPayload }, '*');
-              localStorage.setItem('tns_solaredge_latest_sync', JSON.stringify(syncPayload));
+            func: (syncData) => {
+              window.postMessage({ type: 'TNS_SOLAREDGE_SYNC', payload: syncData }, '*');
+              try {
+                localStorage.setItem('tns_solaredge_latest_sync', JSON.stringify(syncData));
+                window.dispatchEvent(new Event('tns_solaredge_sync_event'));
+              } catch (e) {
+                console.error(e);
+              }
             },
             args: [finalPayload]
           }).catch(console.error);
         }
-      }, 1500);
+      }, 1800);
 
       return { success: true, tabAction: 'opened_new' };
     }
   } catch (error) {
-    console.error('Error handling SolarEdge sync:', error);
+    console.error('[TNS Solar] Error in handleSyncData:', error);
     return { success: false, error: error.message };
   }
 }

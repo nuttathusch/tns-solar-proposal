@@ -79,28 +79,67 @@ export const StepImages: React.FC<StepImagesProps> = ({ proposal, onChange }) =>
     });
   };
 
+  const handleImportFromSolarEdgeStorage = () => {
+    try {
+      const raw = localStorage.getItem('tns_solaredge_latest_sync');
+      if (raw) {
+        const payload = JSON.parse(raw);
+        onChange({
+          ...proposal,
+          customer: {
+            ...proposal.customer,
+            name: payload.projectName || proposal.customer.name,
+            address: payload.street || proposal.customer.address
+          },
+          systemSizeKwp: payload.dcPowerKwp || proposal.systemSizeKwp,
+          panelCount: payload.modulesCount || proposal.panelCount,
+          media: {
+            ...proposal.media,
+            roofDesignTop: payload.canvasDataUrl || proposal.media.roofDesignTop,
+            roofDesignIso: payload.canvasDataUrl || proposal.media.roofDesignIso
+          }
+        });
+        alert('⚡ นำเข้าข้อมูลและรูปภาพจาก SolarEdge เรียบร้อยแล้ว!');
+      } else {
+        alert('ไม่พบข้อมูล SolarEdge ในระบบ กรุณาเปิดแท็บ SolarEdge Designer แล้วกดปุ่ม Sync to TNS Proposal อีกครั้งครับ');
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Header Banner */}
-      <div className="bg-gradient-to-r from-blue-900 to-indigo-900 rounded-2xl p-6 text-white shadow-md flex justify-between items-center">
+      <div className="bg-gradient-to-r from-blue-900 via-indigo-900 to-slate-900 rounded-2xl p-6 text-white shadow-md flex flex-wrap justify-between items-center gap-4">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 bg-blue-500/30 rounded-xl flex items-center justify-center border border-blue-400/30">
             <ImageIcon className="w-5 h-5 text-sky-300" />
           </div>
           <div>
             <h2 className="text-xl font-bold">จัดการรูปภาพหน้างาน และโมเดลหลังคา 3D</h2>
-            <p className="text-xs text-blue-200">สร้างโมเดลหลังคาและวางแผงอัตโนมัติด้วย Smart Roof Studio หรืออัปโหลดรูปภาพ</p>
+            <p className="text-xs text-blue-200">ดึงภาพจาก SolarEdge Designer อัตโนมัติ หรือใช้ Smart Roof Studio ในเว็บ</p>
           </div>
         </div>
 
-        <button
-          type="button"
-          onClick={loadSampleDemoImages}
-          className="flex items-center gap-1.5 bg-amber-500 hover:bg-amber-600 text-white text-xs font-bold px-3.5 py-2 rounded-xl shadow transition cursor-pointer"
-        >
-          <Sparkles className="w-4 h-4" />
-          <span>ใส่รูปถ่ายหน้างานตัวอย่าง</span>
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={handleImportFromSolarEdgeStorage}
+            className="flex items-center gap-1.5 bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-white text-xs font-bold px-3.5 py-2 rounded-xl shadow-lg transition cursor-pointer"
+          >
+            <Sparkles className="w-4 h-4" />
+            <span>⚡ นำเข้าจาก SolarEdge ล่าสุด</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={loadSampleDemoImages}
+            className="flex items-center gap-1.5 bg-white/15 hover:bg-white/25 text-white text-xs font-semibold px-3 py-2 rounded-xl transition cursor-pointer"
+          >
+            <span>รูปตัวอย่าง</span>
+          </button>
+        </div>
       </div>
 
       {/* SMART ROOF & AUTO PV STUDIO SECTION */}
