@@ -1,7 +1,7 @@
-// TNS SolarEdge 1-Click Sync - Service Worker (Manifest V3)
+// TNS SolarEdge 1-Click Sync - Service Worker v1.2
 
 chrome.runtime.onInstalled.addListener(() => {
-  console.log('[TNS Solar SW] Installed / Updated');
+  console.log('[TNS SW] Installed v1.2');
 });
 
 // ─── Message router ─────────────────────────────────────────────────────────
@@ -9,36 +9,51 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'SYNC_SOLAREDGE_DATA') {
     handleSync(message.data, sender.tab)
       .then(result => sendResponse(result))
-      .catch(err => sendResponse({ success: false, error: String(err) }));
-    return true; // keep channel open for async
+      .catch(err => {
+        console.error('[TNS SW] handleSync error:', err);
+        sendResponse({ success: false, error: String(err) });
+      });
+    return true; // keep async channel open
   }
 });
 
-// ─── Core sync handler ───────────────────────────────────────────────────────
+// ─── Core sync ───────────────────────────────────────────────────────────────
 async function handleSync(stats, senderTab) {
-  console.log('[TNS Solar SW] handleSync received:', stats);
+  console.log('[TNS SW] handleSync stats:', JSON.stringify(stats));
+  console.log('[TNS SW] senderTab:', senderTab);
 
-  // 1️⃣  Capture screenshot of the SolarEdge tab BEFORE we switch focus
+  // ── Step 1: Capture screenshot of the SolarEdge tab ──────────────────────
   let screenshotDataUrl = '';
-  try {
-    const windowId = senderTab?.windowId;
-    if (typeof windowId === 'number') {
-      // Make the SolarEdge tab active briefly to capture it
-      if (senderTab?.id) await chrome.tabs.update(senderTab.id, { active: true });
-      screenshotDataUrl = await chrome.tabs.captureVisibleTab(windowId, { format: 'png' });
-      console.log('[TNS Solar SW] Screenshot captured OK, bytes:', screenshotDataUrl.length);
+
+  if (senderTab && typeof senderTab.windowId === 'number') {
+    try {
+      // First, make sure SolarEdge tab is the active (foreground) tab
+      await chrome.tabs.update(senderTab.id, { active: true });
+      // Small delay so the browser has time to bring the tab to front
+      await sleep(300);
+      // Capture the visible area
+      screenshotDataUrl = await chrome.tabs.captureVisibleTab(
+        senderTab.windowId,
+        { format: 'png' }
+      );
+      console.log('[TNS SW] captureVisibleTab OK, dataUrl length:', screenshotDataUrl.length);
+    } catch (err) {
+      console.error('[TNS SW] captureVisibleTab FAILED:', err.message || err);
+      screenshotDataUrl = '';
     }
-  } catch (capErr) {
-    console.warn('[TNS Solar SW] Screenshot failed (non-fatal):', capErr.message);
+  } else {
+    console.warn('[TNS SW] senderTab.windowId missing, skip screenshot');
   }
 
   const payload = { ...stats, screenshotDataUrl };
 
-  // 2️⃣  Persist to chrome.storage.local so the TNS web app can read it any time
+  // ── Step 2: Persist to chrome.storage.local ───────────────────────────────
   await chrome.storage.local.set({ tns_solaredge_sync: payload });
-  console.log('[TNS Solar SW] Saved to chrome.storage.local');
+  // Also write with the key the web app reads from localStorage
+  // (we inject it directly via executeScript below, but keep it in storage too)
+  console.log('[TNS SW] Saved to storage. screenshotDataUrl length:', screenshotDataUrl.length);
 
-  // 3️⃣  Find open TNS Proposal tab and inject data directly
+  // ── Step 3: Find open TNS tab ─────────────────────────────────────────────
   const allTabs = await chrome.tabs.query({});
   const tnsTab = allTabs.find(t =>
     t.url && (
@@ -49,65 +64,79 @@ async function handleSync(stats, senderTab) {
   );
 
   if (tnsTab?.id) {
-    console.log('[TNS Solar SW] Found TNS tab:', tnsTab.id);
-    // Switch focus to TNS tab
-    await chrome.tabs.update(tnsTab.id, { active: true });
-    await chrome.windows.update(tnsTab.windowId, { focused: true });
+    console.log('[TNS SW] Found TNS tab id:', tnsTab.id, 'url:', tnsTab.url);
 
-    // Inject data directly into the page context
+    // Bring TNS tab to front
+    await chrome.tabs.update(tnsTab.id, { active: true });
+    if (typeof tnsTab.windowId === 'number') {
+      await chrome.windows.update(tnsTab.windowId, { focused: true });
+    }
+
+    // Inject the payload into the page context (writes localStorage + fires postMessage)
     await chrome.scripting.executeScript({
       target: { tabId: tnsTab.id },
-      func: injectIntoPage,
+      func: injectPayloadIntoPage,
       args: [payload]
     });
 
-    return { success: true, action: 'injected_into_existing_tab' };
+    console.log('[TNS SW] executeScript done on TNS tab');
+    return { success: true, action: 'injected_existing_tab', hasScreenshot: !!screenshotDataUrl };
   } else {
-    // No TNS tab open → open one and inject after load
-    console.log('[TNS Solar SW] No TNS tab open, opening new one...');
+    console.log('[TNS SW] No open TNS tab, opening new one...');
     const newTab = await chrome.tabs.create({
       url: 'https://nuttathusch.github.io/tns-solar-proposal/'
     });
 
-    // Wait for page to fully load then inject
-    await waitForTabComplete(newTab.id);
+    await waitForTabComplete(newTab.id, 10000);
+    await sleep(500); // give React time to mount
+
     await chrome.scripting.executeScript({
       target: { tabId: newTab.id },
-      func: injectIntoPage,
+      func: injectPayloadIntoPage,
       args: [payload]
     });
 
-    return { success: true, action: 'opened_new_tab_and_injected' };
+    console.log('[TNS SW] executeScript done on new TNS tab');
+    return { success: true, action: 'opened_new_tab', hasScreenshot: !!screenshotDataUrl };
   }
 }
 
-// ─── This function runs INSIDE the TNS web page context ─────────────────────
-function injectIntoPage(syncPayload) {
-  console.log('[TNS Page] Extension injected payload:', syncPayload);
-  // Write to localStorage so the "นำเข้าจาก SolarEdge" button can read it
+// ─── Injected into the TNS web page ─────────────────────────────────────────
+// This function runs in the page context (not extension context)
+function injectPayloadIntoPage(syncPayload) {
+  console.log('[TNS Page] Extension injected, screenshotDataUrl length:',
+    (syncPayload.screenshotDataUrl || '').length);
+
+  // Write to localStorage
   try {
     localStorage.setItem('tns_solaredge_latest_sync', JSON.stringify(syncPayload));
-  } catch (e) {}
-  // Also fire a postMessage for the React listener in App.tsx
+  } catch (e) {
+    console.error('[TNS Page] localStorage write failed:', e);
+  }
+
+  // Fire postMessage so App.tsx listener picks it up immediately
   window.postMessage({ type: 'TNS_SOLAREDGE_SYNC', payload: syncPayload }, '*');
 }
 
-// ─── Wait for a tab to finish loading ───────────────────────────────────────
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 function waitForTabComplete(tabId, timeoutMs = 8000) {
   return new Promise((resolve) => {
     const deadline = Date.now() + timeoutMs;
 
-    function checkDone(updatedTabId, changeInfo) {
+    function listener(updatedTabId, changeInfo) {
       if (updatedTabId === tabId && changeInfo.status === 'complete') {
-        chrome.tabs.onUpdated.removeListener(checkDone);
+        chrome.tabs.onUpdated.removeListener(listener);
         resolve();
       }
       if (Date.now() > deadline) {
-        chrome.tabs.onUpdated.removeListener(checkDone);
-        resolve(); // resolve anyway to avoid hanging
+        chrome.tabs.onUpdated.removeListener(listener);
+        resolve();
       }
     }
-
-    chrome.tabs.onUpdated.addListener(checkDone);
+    chrome.tabs.onUpdated.addListener(listener);
   });
 }
