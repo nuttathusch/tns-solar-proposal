@@ -82,31 +82,49 @@ export const StepImages: React.FC<StepImagesProps> = ({ proposal, onChange }) =>
   const handleImportFromSolarEdgeStorage = () => {
     try {
       const raw = localStorage.getItem('tns_solaredge_latest_sync');
-      if (raw) {
-        const payload = JSON.parse(raw);
-        onChange({
-          ...proposal,
-          customer: {
-            ...proposal.customer,
-            name: payload.projectName || proposal.customer.name,
-            address: payload.street || proposal.customer.address
-          },
-          systemSizeKwp: payload.dcPowerKwp || proposal.systemSizeKwp,
-          panelCount: payload.modulesCount || proposal.panelCount,
-          media: {
-            ...proposal.media,
-            roofDesignTop: payload.canvasDataUrl || proposal.media.roofDesignTop,
-            roofDesignIso: payload.canvasDataUrl || proposal.media.roofDesignIso
-          }
-        });
-        alert('⚡ นำเข้าข้อมูลและรูปภาพจาก SolarEdge เรียบร้อยแล้ว!');
-      } else {
-        alert('ไม่พบข้อมูล SolarEdge ในระบบ กรุณาเปิดแท็บ SolarEdge Designer แล้วกดปุ่ม Sync to TNS Proposal อีกครั้งครับ');
+      if (!raw) {
+        alert('ไม่พบข้อมูล SolarEdge ในระบบ\n\nกรุณา:\n1. เปิดแท็บ SolarEdge Designer\n2. กดปุ่มสีเขียว "⚡ Sync to TNS Proposal" บนหน้า SolarEdge\n3. กดปุ่มนี้อีกครั้งครับ');
+        return;
       }
+      const payload = JSON.parse(raw);
+      // Support both old (canvasDataUrl) and new (screenshotDataUrl) field names
+      const imageUrl = payload.screenshotDataUrl || payload.canvasDataUrl || '';
+
+      onChange({
+        ...proposal,
+        customer: {
+          ...proposal.customer,
+          name: payload.projectName || proposal.customer.name,
+          address: payload.address || payload.street || proposal.customer.address
+        },
+        systemSizeKwp: (payload.dcPowerKwp && payload.dcPowerKwp > 0)
+          ? payload.dcPowerKwp
+          : proposal.systemSizeKwp,
+        panelCount: (payload.modulesCount && payload.modulesCount > 0)
+          ? payload.modulesCount
+          : proposal.panelCount,
+        media: {
+          ...proposal.media,
+          ...(imageUrl ? { roofDesignTop: imageUrl, roofDesignIso: imageUrl } : {})
+        }
+      });
+
+      const when = payload.timestamp ? new Date(payload.timestamp).toLocaleString('th-TH') : 'ไม่ทราบเวลา';
+      alert(
+        `⚡ นำเข้าข้อมูล SolarEdge เรียบร้อย!\n` +
+        `• โครงการ: ${payload.projectName || '—'}\n` +
+        `• กำลังผลิต: ${payload.dcPowerKwp || '—'} kWp\n` +
+        `• จำนวนแผง: ${payload.modulesCount || '—'} แผง\n` +
+        `• ผลิตไฟ: ${payload.annualMwh || '—'} MWh/ปี\n` +
+        `• ภาพ: ${imageUrl ? '✅ บันทึกลงเล่มแล้ว' : '❌ ยังไม่มีภาพ (รีโหลด Extension แล้วลอง Sync อีกครั้ง)'}\n` +
+        `• บันทึกเมื่อ: ${when}`
+      );
     } catch (e) {
-      console.error(e);
+      console.error('[TNS] Import error:', e);
+      alert('เกิดข้อผิดพลาดในการอ่านข้อมูล SolarEdge กรุณาลอง Sync อีกครั้งครับ');
     }
   };
+
 
   return (
     <div className="space-y-6">

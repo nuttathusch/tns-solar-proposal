@@ -1,27 +1,27 @@
-// TNS SolarEdge 1-Click Sync Content Script
+// TNS SolarEdge 1-Click Sync - Content Script (runs on designer.solaredge.com)
 
 (function () {
-  console.log('[TNS Solar] Content script active on SolarEdge Designer');
+  if (document.__TNS_LOADED) return;
+  document.__TNS_LOADED = true;
 
-  // Inject Floating 1-Click Sync Button
+  console.log('[TNS Solar] Content script loaded on SolarEdge Designer');
+
+  // ─── Inject floating sync button ───────────────────────────────────────────
   function injectFloatingButton() {
     if (document.getElementById('tns-sync-floating-btn')) return;
+    if (!document.body) return;
 
     const btn = document.createElement('button');
     btn.id = 'tns-sync-floating-btn';
     btn.innerHTML = `
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
-      </svg>
+      <span style="font-size:18px;">⚡</span>
       <span>Sync to TNS Proposal</span>
     `;
-
-    // Styling
     Object.assign(btn.style, {
       position: 'fixed',
       bottom: '24px',
       right: '24px',
-      zIndex: '9999999',
+      zIndex: '2147483647',
       display: 'flex',
       alignItems: 'center',
       gap: '8px',
@@ -31,166 +31,126 @@
       borderRadius: '50px',
       fontSize: '14px',
       fontWeight: '800',
-      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Prompt", sans-serif',
-      boxShadow: '0 10px 25px -5px rgba(5, 150, 105, 0.6), 0 8px 10px -6px rgba(5, 150, 105, 0.4)',
-      border: '2px solid rgba(255, 255, 255, 0.4)',
+      fontFamily: 'system-ui, -apple-system, sans-serif',
+      boxShadow: '0 10px 30px rgba(5,150,105,0.6)',
+      border: '2px solid rgba(255,255,255,0.4)',
       cursor: 'pointer',
-      transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)'
+      transition: 'all 0.2s ease'
     });
 
-    btn.addEventListener('mouseenter', () => {
-      btn.style.transform = 'translateY(-2px) scale(1.04)';
-      btn.style.boxShadow = '0 15px 30px -5px rgba(5, 150, 105, 0.7)';
-    });
-
-    btn.addEventListener('mouseleave', () => {
-      btn.style.transform = 'translateY(0) scale(1)';
-      btn.style.boxShadow = '0 10px 25px -5px rgba(5, 150, 105, 0.6)';
-    });
-
-    btn.addEventListener('click', handleSyncClick);
+    btn.onmouseenter = () => { btn.style.transform = 'translateY(-2px) scale(1.04)'; };
+    btn.onmouseleave = () => { btn.style.transform = 'translateY(0) scale(1)'; };
+    btn.onclick = handleSyncClick;
 
     document.body.appendChild(btn);
   }
 
-  // Extract Data from SolarEdge Designer DOM
-  function extractSolarEdgeData() {
-    // 1. Project Title / Customer Name
-    let projectName = '';
-    const nameEl = document.querySelector('.project-name, [data-qa="project-name"], h1, .header-title, input[name="name"]');
-    if (nameEl) {
-      projectName = nameEl.textContent?.trim() || (nameEl).value?.trim() || '';
-    }
-    if (!projectName) {
-      const match = document.title.match(/DESIGNER\s*[|•-]?\s*(.*)/i);
-      projectName = match ? match[1].trim() : document.title;
-    }
-
-    // 2. Address / Street
-    let street = '';
-    const streetEl = document.querySelector('[data-qa="street"], .street-name, input[name="street"]');
-    if (streetEl) {
-      street = streetEl.textContent?.trim() || (streetEl).value?.trim() || '';
-    }
-
-    // 3. System Stats (kWp, Modules, MWh)
-    let dcPowerKwp = 0;
-    let modulesCount = 0;
-    let annualMwh = 0;
-
+  // ─── Extract stats from SolarEdge DOM ─────────────────────────────────────
+  function extractStats() {
     const pageText = document.body.innerText || '';
-    
-    // Extract DC Power (e.g. "13/13 kWp", "13 kWp", "3.5 kWp")
-    const kwpMatch = pageText.match(/(\d+(?:\.\d+)?)\s*(?:\/\s*\d+(?:\.\d+)?\s*)?kWp/i);
-    if (kwpMatch) {
-      dcPowerKwp = parseFloat(kwpMatch[1]);
+
+    // Project name: try header or document title
+    let projectName = '';
+    const nameEl = document.querySelector(
+      '[data-qa="project-name"], .project-name, .site-name, .header-site-name'
+    );
+    if (nameEl) projectName = (nameEl.textContent || '').trim();
+    if (!projectName) {
+      const m = document.title.match(/SolarEdge\s*-?\s*Designer\s*[|–-]?\s*(.*)/i);
+      projectName = m ? m[1].trim() : document.title.trim();
     }
 
-    // Extract PV Modules count (e.g. "20/20", "6/6")
-    const modulesMatch = pageText.match(/(\d+)\s*\/\s*(\d+)/) || pageText.match(/(\d+)\s*PV\s*MODULES/i);
-    if (modulesMatch) {
-      modulesCount = parseInt(modulesMatch[2] || modulesMatch[1]);
-    }
+    // Address
+    let address = '';
+    const addrEl = document.querySelector('[data-qa="street"], .street-field, input[name="street"]');
+    if (addrEl) address = (addrEl.textContent || addrEl.value || '').trim();
 
-    // Extract Annual Production (e.g. "18.96 MWh")
+    // DC Power (e.g. "13/13 kWp" → 13)
+    let dcPowerKwp = 0;
+    const kwpMatch = pageText.match(/(\d+(?:\.\d+)?)\s*\/\s*\d+(?:\.\d+)?\s*kWp/i)
+                  || pageText.match(/(\d+(?:\.\d+)?)\s*kWp/i);
+    if (kwpMatch) dcPowerKwp = parseFloat(kwpMatch[1]);
+
+    // Module count (e.g. "20/20" → 20)
+    let modulesCount = 0;
+    const modMatch = pageText.match(/(\d+)\s*\/\s*(\d+)\s*(?:PV)?/)
+                  || pageText.match(/(\d+)\s*PV\s*MODULES?/i);
+    if (modMatch) modulesCount = parseInt(modMatch[2] || modMatch[1], 10);
+
+    // Annual production (e.g. "18.96 MWh")
+    let annualMwh = 0;
     const mwhMatch = pageText.match(/(\d+(?:\.\d+)?)\s*MWh/i);
-    if (mwhMatch) {
-      annualMwh = parseFloat(mwhMatch[1]);
-    }
+    if (mwhMatch) annualMwh = parseFloat(mwhMatch[1]);
 
-    return {
-      projectName,
-      street,
-      dcPowerKwp,
-      modulesCount,
-      annualMwh,
-      sourceUrl: window.location.href,
-      timestamp: new Date().toISOString()
-    };
+    return { projectName, address, dcPowerKwp, modulesCount, annualMwh,
+             sourceUrl: location.href, timestamp: new Date().toISOString() };
   }
 
-  // Toast Notification
-  function showToast(message, type = 'success') {
-    const toast = document.createElement('div');
-    toast.innerHTML = `
-      <div style="display: flex; align-items: center; gap: 10px;">
-        <span style="font-size: 20px;">${type === 'success' ? '⚡' : '⚠️'}</span>
-        <span>${message}</span>
-      </div>
-    `;
-
-    Object.assign(toast.style, {
-      position: 'fixed',
-      top: '24px',
-      right: '24px',
-      zIndex: '10000000',
-      background: type === 'success' ? '#0f172a' : '#991b1b',
-      color: '#ffffff',
-      border: '1px solid rgba(255, 255, 255, 0.3)',
-      padding: '14px 24px',
-      borderRadius: '16px',
-      fontSize: '14px',
-      fontWeight: '700',
-      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Prompt", sans-serif',
-      boxShadow: '0 20px 30px -5px rgba(0, 0, 0, 0.6)',
-      transition: 'all 0.3s ease'
+  // ─── Show toast ───────────────────────────────────────────────────────────
+  function showToast(msg, ok = true) {
+    const t = document.createElement('div');
+    t.textContent = msg;
+    Object.assign(t.style, {
+      position: 'fixed', top: '20px', right: '20px', zIndex: '2147483647',
+      background: ok ? '#0f172a' : '#991b1b', color: '#fff',
+      padding: '14px 22px', borderRadius: '14px',
+      fontSize: '14px', fontWeight: '700',
+      boxShadow: '0 20px 30px rgba(0,0,0,0.5)',
+      fontFamily: 'system-ui, -apple-system, sans-serif',
+      maxWidth: '320px'
     });
-
-    document.body.appendChild(toast);
-    setTimeout(() => {
-      toast.style.opacity = '0';
-      toast.style.transform = 'translateY(-10px)';
-      setTimeout(() => toast.remove(), 300);
-    }, 4000);
+    document.body.appendChild(t);
+    setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 300); }, 4000);
   }
 
-  // Handle 1-Click Sync
+  // ─── Main sync click handler ───────────────────────────────────────────────
   async function handleSyncClick() {
     const btn = document.getElementById('tns-sync-floating-btn');
-    if (btn) {
-      btn.innerHTML = '<span>กำลังดึงรูปและข้อมูล...</span>';
-      btn.style.opacity = '0.8';
-    }
+    if (btn) { btn.textContent = 'กำลังส่งข้อมูล...'; btn.style.opacity = '0.7'; }
 
-    const payload = extractSolarEdgeData();
-    console.log('[TNS Solar] Extracted SolarEdge data:', payload);
+    const stats = extractStats();
+    console.log('[TNS Solar] Sending stats to background:', stats);
 
-    chrome.runtime.sendMessage({
-      action: 'SYNC_SOLAREDGE_DATA',
-      data: payload
-    }, (response) => {
-      if (btn) {
-        btn.innerHTML = `
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="20 6 9 17 4 12"></polyline>
-          </svg>
-          <span>Sync เรียบร้อย!</span>
-        `;
+    chrome.runtime.sendMessage(
+      { action: 'SYNC_SOLAREDGE_DATA', data: stats },
+      (resp) => {
+        if (chrome.runtime.lastError) {
+          console.error('[TNS Solar] sendMessage error:', chrome.runtime.lastError.message);
+          showToast('❌ Extension Error: ' + chrome.runtime.lastError.message, false);
+        } else if (resp && resp.success) {
+          showToast('⚡ ส่งข้อมูลไปยัง TNS Proposal เรียบร้อยแล้ว! กำลังเปิดหน้าเว็บ...');
+        } else {
+          showToast('⚠️ ส่งข้อมูลแล้ว แต่ไม่พบแท็บ TNS Proposal Studio ที่เปิดค้างไว้');
+        }
+        // Restore button after 3s
         setTimeout(() => {
-          injectFloatingButton();
+          if (btn) {
+            btn.innerHTML = '<span style="font-size:18px;">⚡</span><span>Sync to TNS Proposal</span>';
+            btn.style.opacity = '1';
+          }
         }, 3000);
       }
-
-      showToast('ดึงภาพ SolarEdge และส่งไปยัง TNS Proposal Studio เรียบร้อยแล้ว!');
-    });
+    );
   }
 
-  // Listen for popup trigger
-  chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    if (request.action === 'GET_SOLAREDGE_DATA') {
-      const data = extractSolarEdgeData();
-      sendResponse({ success: true, data });
-      return true;
+  // ─── Listen for popup requests ─────────────────────────────────────────────
+  chrome.runtime.onMessage.addListener((req, _sender, sendResponse) => {
+    if (req.action === 'GET_SOLAREDGE_DATA') {
+      sendResponse({ success: true, data: extractStats() });
     }
+    return false;
   });
 
-  // Inject when DOM ready
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', injectFloatingButton);
-  } else {
+  // ─── Boot ─────────────────────────────────────────────────────────────────
+  function boot() {
     injectFloatingButton();
+    // Re-check every 2 s in case SolarEdge SPA navigates away
+    setInterval(injectFloatingButton, 2000);
   }
 
-  // Retry after dynamic route changes in SolarEdge SPA
-  setInterval(injectFloatingButton, 1500);
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', boot);
+  } else {
+    boot();
+  }
 })();

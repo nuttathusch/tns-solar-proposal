@@ -36,44 +36,54 @@ export default function App() {
     saveProposal(proposal);
   }, [proposal]);
 
-  // Listen for TNS Chrome Extension 1-Click Sync events
+  // Listen for TNS Chrome Extension 1-Click Sync events (postMessage from injected script)
   useEffect(() => {
     const handleExtensionMessage = (event: MessageEvent) => {
-      if (event.data && event.data.type === 'TNS_SOLAREDGE_SYNC') {
-        const payload = event.data.payload;
-        console.log('[TNS App] Received sync from Chrome Extension:', payload);
-        
-        setProposal(prev => {
-          const updated = { ...prev };
-          if (payload.projectName) {
-            updated.customer = { ...updated.customer, name: payload.projectName };
-          }
-          if (payload.street) {
-            updated.customer = { ...updated.customer, address: payload.street };
-          }
-          if (payload.dcPowerKwp && payload.dcPowerKwp > 0) {
-            updated.systemSizeKwp = payload.dcPowerKwp;
-          }
-          if (payload.modulesCount && payload.modulesCount > 0) {
-            updated.panelCount = payload.modulesCount;
-          }
-          if (payload.canvasDataUrl) {
-            updated.media = {
-              ...updated.media,
-              roofDesignTop: payload.canvasDataUrl,
-              roofDesignIso: payload.canvasDataUrl
-            };
-          }
-          return updated;
-        });
+      if (!event.data || event.data.type !== 'TNS_SOLAREDGE_SYNC') return;
 
-        alert(`⚡ ได้รับข้อมูลจาก SolarEdge เรียบร้อยแล้ว!\n• โครงการ: ${payload.projectName || 'SolarEdge Design'}\n• กำลังผลิต: ${payload.dcPowerKwp || '13'} kWp\n• จำนวนแผง: ${payload.modulesCount || '20'} แผง\n• บันทึกรูปภาพ 2D/3D เข้าเล่ม Proposal เรียบร้อยแล้วครับ!`);
-      }
+      const payload = event.data.payload;
+      console.log('[TNS App] Received SolarEdge sync payload:', payload);
+
+      // Support both old field name (canvasDataUrl) and new (screenshotDataUrl)
+      const imageUrl = payload.screenshotDataUrl || payload.canvasDataUrl || '';
+
+      setProposal(prev => ({
+        ...prev,
+        customer: {
+          ...prev.customer,
+          name: payload.projectName || prev.customer.name,
+          address: payload.address || payload.street || prev.customer.address
+        },
+        systemSizeKwp: (payload.dcPowerKwp && payload.dcPowerKwp > 0)
+          ? payload.dcPowerKwp
+          : prev.systemSizeKwp,
+        panelCount: (payload.modulesCount && payload.modulesCount > 0)
+          ? payload.modulesCount
+          : prev.panelCount,
+        media: {
+          ...prev.media,
+          ...(imageUrl ? { roofDesignTop: imageUrl, roofDesignIso: imageUrl } : {})
+        }
+      }));
+
+      const kwp  = payload.dcPowerKwp   || '—';
+      const mod  = payload.modulesCount || '—';
+      const mwh  = payload.annualMwh    || '—';
+      const name = payload.projectName  || 'SolarEdge Design';
+      alert(
+        `⚡ นำเข้าข้อมูล SolarEdge เรียบร้อย!\n` +
+        `• โครงการ: ${name}\n` +
+        `• กำลังผลิต: ${kwp} kWp\n` +
+        `• จำนวนแผง: ${mod} แผง\n` +
+        `• ผลิตไฟ: ${mwh} MWh/ปี\n` +
+        `• ภาพ Screenshot: ${imageUrl ? 'บันทึกลงเล่ม Proposal หน้า 4-5 แล้ว ✅' : 'ไม่มีภาพ (กด นำเข้าจาก SolarEdge ล่าสุด อีกครั้ง)'}`
+      );
     };
 
     window.addEventListener('message', handleExtensionMessage);
     return () => window.removeEventListener('message', handleExtensionMessage);
   }, []);
+
 
   const handleManualSave = () => {
     saveProposal(proposal);
